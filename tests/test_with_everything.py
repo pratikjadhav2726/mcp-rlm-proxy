@@ -15,7 +15,7 @@ async def test_with_everything():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     try:

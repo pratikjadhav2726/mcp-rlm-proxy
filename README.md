@@ -101,18 +101,35 @@ Use both projection and grep together:
 ### Prerequisites
 
 - Python 3.12 or later
-- [uv](https://github.com/astral-sh/uv) package manager
+- [uv](https://github.com/astral-sh/uv) package manager (recommended) or pip
 
-### Setup
+### Installation from Source
 
-1. Clone or navigate to the project directory:
+1. Clone the repository:
 ```bash
+git clone https://github.com/yourusername/mcp-proxy-server.git
 cd mcp-proxy-server
 ```
 
 2. Install dependencies using `uv`:
 ```bash
 uv sync
+```
+
+Or using pip:
+```bash
+pip install -e .
+```
+
+### Installation as Package
+
+```bash
+pip install mcp-proxy-server
+```
+
+Or using uv:
+```bash
+uv pip install mcp-proxy-server
 ```
 
 ## Configuration
@@ -146,12 +163,23 @@ underlying_servers:
 
 ### Running the Proxy Server
 
+Using uv:
 ```bash
-uv run proxy_server.py
+uv run -m mcp_proxy
+```
+
+Or using the installed package:
+```bash
+mcp-proxy
+```
+
+Or using Python directly:
+```bash
+python -m mcp_proxy
 ```
 
 The server will:
-1. Load configuration from `config.yaml`
+1. Load configuration from `config.yaml` (in the current directory or project root)
 2. Connect to all configured underlying servers
 3. Aggregate tools from all servers (prefixed with server name)
 4. Start listening for MCP client connections via stdio
@@ -175,7 +203,7 @@ from mcp.client.stdio import stdio_client
 # Connect to proxy server
 server_params = StdioServerParameters(
     command="uv",
-    args=["run", "proxy_server.py"]
+    args=["run", "-m", "mcp_proxy"]
 )
 
 async with stdio_client(server_params) as (read, write):
@@ -312,18 +340,48 @@ Example: A 10KB response reduced to 500 bytes = 95% token savings.
 
 ```
 mcp-proxy-server/
-├── proxy_server.py    # Main proxy server implementation
-├── config.yaml        # Server configuration
-├── pyproject.toml     # Project dependencies
-├── README.md          # This file
-└── main.py            # Entry point (optional)
+├── src/
+│   └── mcp_proxy/          # Main package
+│       ├── __init__.py      # Package initialization
+│       ├── __main__.py      # Entry point
+│       ├── server.py        # Main server implementation
+│       ├── processors.py    # Projection and grep processors
+│       └── config.py        # Configuration loading
+├── tests/                   # Test files
+├── examples/                # Example usage scripts
+├── docs/                    # Additional documentation
+├── config.yaml.example      # Example configuration
+├── pyproject.toml           # Project configuration and dependencies
+├── README.md                # This file
+├── CONTRIBUTING.md          # Contribution guidelines
+├── CHANGELOG.md             # Version history
+└── LICENSE                  # MIT License
 ```
 
 ### Key Components
 
-- **`MCPProxyServer`**: Main server class that manages connections and tool calls
-- **`ProjectionProcessor`**: Handles field projection operations
-- **`GrepProcessor`**: Handles grep search operations
+- **`MCPProxyServer`**: Main server class that manages connections and tool calls (in `server.py`)
+- **`ProjectionProcessor`**: Handles field projection operations (in `processors.py`)
+- **`GrepProcessor`**: Handles grep search operations (in `processors.py`)
+
+### Development Setup
+
+1. Clone the repository and install in development mode:
+```bash
+git clone https://github.com/yourusername/mcp-proxy-server.git
+cd mcp-proxy-server
+uv sync --group dev
+```
+
+2. Run tests:
+```bash
+uv run pytest
+```
+
+3. Run the server in development:
+```bash
+uv run -m mcp_proxy
+```
 
 ### Testing
 
@@ -331,7 +389,7 @@ Test with MCP Inspector:
 
 ```bash
 # Terminal 1: Run proxy server
-uv run proxy_server.py
+uv run -m mcp_proxy
 
 # Terminal 2: Run inspector
 npx -y @modelcontextprotocol/inspector
@@ -351,11 +409,13 @@ Connect inspector to the proxy server to test tool calls with projections and gr
 
 ## Contributing
 
-This project aligns with the MCP protocol specification and the ideas discussed in [issue #1709](https://github.com/modelcontextprotocol/servers/issues/1709). Contributions are welcome!
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+This project aligns with the MCP protocol specification and the ideas discussed in [issue #1709](https://github.com/modelcontextprotocol/servers/issues/1709).
 
 ## License
 
-[Add your license here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## References
 

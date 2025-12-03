@@ -16,7 +16,7 @@ async def test_echo_basic():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):
@@ -48,7 +48,7 @@ async def test_echo_with_grep():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):
@@ -100,7 +100,7 @@ async def test_echo_with_grep_max_matches():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):
@@ -161,7 +161,7 @@ async def test_echo_schema_check():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):

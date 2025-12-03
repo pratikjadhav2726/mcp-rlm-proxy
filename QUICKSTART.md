@@ -28,7 +28,12 @@ underlying_servers:
 ## Step 3: Run the Proxy Server
 
 ```bash
-uv run proxy_server.py
+uv run -m mcp_proxy
+```
+
+Or if installed as a package:
+```bash
+mcp-proxy
 ```
 
 The server will:

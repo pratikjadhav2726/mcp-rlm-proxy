@@ -14,7 +14,7 @@ async def test_proxy_connection():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     try:

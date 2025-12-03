@@ -1,20 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "mcp-proxy-server"
 version = "0.1.0"
 description = "MCP Proxy Server with field projection and grep capabilities"
+readme = "README.md"
 requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "MCP Proxy Contributors"}
+]
+keywords = ["mcp", "model-context-protocol", "proxy", "llm", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
 dependencies = [
     "mcp>=1.23.1",
     "pyyaml>=6.0.3",
-    "uvicorn[standard]>=0.38.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/mcp-proxy-server"
+Documentation = "https://github.com/yourusername/mcp-proxy-server#readme"
+Repository = "https://github.com/yourusername/mcp-proxy-server"
+Issues = "https://github.com/yourusername/mcp-proxy-server/issues"
+
+[project.scripts]
+mcp-proxy = "mcp_proxy.__main__:main"
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.1",
+    "pytest-asyncio>=0.21.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_proxy"]

@@ -14,7 +14,7 @@ async def test_projection():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):
@@ -61,7 +61,7 @@ async def test_grep():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):
@@ -104,7 +104,7 @@ async def test_combined():
     
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "proxy_server.py"]
+        args=["run", "-m", "mcp_proxy"]
     )
     
     async with stdio_client(server_params) as (read, write):

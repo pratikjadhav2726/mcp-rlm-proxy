@@ -4,7 +4,7 @@ Unit tests for ProjectionProcessor and GrepProcessor.
 
 import json
 import pytest
-from proxy_server import ProjectionProcessor, GrepProcessor
+from mcp_proxy.processors import ProjectionProcessor, GrepProcessor
 from mcp.types import TextContent, Content
 
 
