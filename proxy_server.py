@@ -431,6 +431,105 @@ class MCPProxyServer:
         # Register handlers
         self._register_handlers()
 
+    def _enhance_tool_schema(self, input_schema: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
+        """
+        Enhance tool input schema to include _meta parameter for projection and grep.
+        
+        Args:
+            input_schema: Original tool input schema (dict or Pydantic model)
+            
+        Returns:
+            Enhanced schema with _meta parameter
+        """
+        # Convert to dict if it's a Pydantic model
+        if hasattr(input_schema, 'model_dump'):
+            schema_dict = input_schema.model_dump()
+        elif hasattr(input_schema, 'dict'):
+            schema_dict = input_schema.dict()
+        elif isinstance(input_schema, dict):
+            schema_dict = input_schema
+        else:
+            # Fallback: try to convert to dict
+            schema_dict = dict(input_schema) if input_schema else {}
+        
+        # Create a deep copy to avoid modifying the original
+        enhanced_schema = json.loads(json.dumps(schema_dict))
+        
+        # Ensure it's a valid JSON Schema object
+        if "type" not in enhanced_schema:
+            enhanced_schema["type"] = "object"
+        
+        # Ensure properties exist
+        if "properties" not in enhanced_schema:
+            enhanced_schema["properties"] = {}
+        
+        # CRITICAL: Override additionalProperties to True to allow _meta parameter
+        # Even if the original schema has additionalProperties: false, we need to allow _meta
+        enhanced_schema["additionalProperties"] = True
+        
+        # Add _meta parameter
+        enhanced_schema["properties"]["_meta"] = {
+            "type": "object",
+            "description": "Optional metadata for field projection and grep filtering. Use this to optimize token usage and filter results.",
+            "properties": {
+                "projection": {
+                    "type": "object",
+                    "description": "Field projection to include/exclude specific fields from the response. Reduces token usage by 85-95% in many cases.",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["include", "exclude", "view"],
+                            "description": "Projection mode: 'include' returns only specified fields, 'exclude' returns all except specified fields, 'view' uses named preset views"
+                        },
+                        "fields": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "List of field paths to include/exclude. Supports nested paths like 'user.name' or 'users.email' for arrays."
+                        },
+                        "view": {
+                            "type": "string",
+                            "description": "Optional named view preset (used with mode='view')"
+                        }
+                    },
+                    "required": ["mode", "fields"]
+                },
+                "grep": {
+                    "type": "object",
+                    "description": "Grep-like search to filter tool outputs using regex patterns. Extracts only matching content.",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for in the tool output"
+                        },
+                        "caseInsensitive": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Whether to perform case-insensitive matching"
+                        },
+                        "maxMatches": {
+                            "type": "number",
+                            "description": "Maximum number of matches to return"
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["content", "structuredContent"],
+                            "default": "content",
+                            "description": "Where to search: 'content' for plain text, 'structuredContent' for JSON data"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            },
+            "additionalProperties": False
+        }
+        
+        # Note: We don't add "_meta" to required fields since it's optional
+        # The original required fields are preserved
+        
+        return enhanced_schema
+
     def _register_handlers(self):
         """Register MCP server handlers."""
 
@@ -448,11 +547,35 @@ class MCPProxyServer:
             for server_name, cached_tools in self.tools_cache.items():
                 print(f"[DEBUG] Using {len(cached_tools)} cached tools from {server_name}", file=sys.stderr)
                 for tool in cached_tools:
+                    # Enhance schema with _meta parameter
+                    enhanced_schema = self._enhance_tool_schema(tool.inputSchema)
+                    
+                    # Debug: Verify _meta is in the schema
+                    if isinstance(enhanced_schema, dict) and "properties" in enhanced_schema:
+                        has_meta = "_meta" in enhanced_schema.get("properties", {})
+                        print(f"[DEBUG] Tool {server_name}_{tool.name}: _meta in schema = {has_meta}", file=sys.stderr)
+                        if has_meta:
+                            print(f"[DEBUG]   _meta properties: {list(enhanced_schema['properties']['_meta'].get('properties', {}).keys())}", file=sys.stderr)
+                    
                     prefixed_tool = Tool(
                         name=f"{server_name}_{tool.name}",
                         description=tool.description or "",
-                        inputSchema=tool.inputSchema,
+                        inputSchema=enhanced_schema,
                     )
+                    
+                    # Debug: Verify _meta is in the created Tool object
+                    tool_schema = prefixed_tool.inputSchema
+                    if hasattr(tool_schema, 'model_dump'):
+                        tool_schema_dict = tool_schema.model_dump()
+                    elif isinstance(tool_schema, dict):
+                        tool_schema_dict = tool_schema
+                    else:
+                        tool_schema_dict = {}
+                    
+                    if isinstance(tool_schema_dict, dict) and "properties" in tool_schema_dict:
+                        has_meta_after = "_meta" in tool_schema_dict.get("properties", {})
+                        print(f"[DEBUG] Tool {server_name}_{tool.name} after Tool() creation: _meta in schema = {has_meta_after}", file=sys.stderr)
+                    
                     all_tools.append(prefixed_tool)
             
             # Also try to get tools from active sessions (in case cache is stale or empty)
@@ -465,11 +588,33 @@ class MCPProxyServer:
                         # Prefix tool names with server name to avoid conflicts
                         # Use underscore separator instead of :: to avoid validation warnings
                         for tool in tools_result.tools:
+                            # Enhance schema with _meta parameter
+                            enhanced_schema = self._enhance_tool_schema(tool.inputSchema)
+                            
+                            # Debug: Verify _meta is in the schema
+                            if isinstance(enhanced_schema, dict) and "properties" in enhanced_schema:
+                                has_meta = "_meta" in enhanced_schema.get("properties", {})
+                                print(f"[DEBUG] Tool {server_name}_{tool.name}: _meta in schema = {has_meta}", file=sys.stderr)
+                            
                             prefixed_tool = Tool(
                                 name=f"{server_name}_{tool.name}",
                                 description=tool.description or "",
-                                inputSchema=tool.inputSchema,
+                                inputSchema=enhanced_schema,
                             )
+                            
+                            # Debug: Verify _meta is in the created Tool object
+                            tool_schema = prefixed_tool.inputSchema
+                            if hasattr(tool_schema, 'model_dump'):
+                                tool_schema_dict = tool_schema.model_dump()
+                            elif isinstance(tool_schema, dict):
+                                tool_schema_dict = tool_schema
+                            else:
+                                tool_schema_dict = {}
+                            
+                            if isinstance(tool_schema_dict, dict) and "properties" in tool_schema_dict:
+                                has_meta_after = "_meta" in tool_schema_dict.get("properties", {})
+                                print(f"[DEBUG] Tool {server_name}_{tool.name} after Tool() creation: _meta in schema = {has_meta_after}", file=sys.stderr)
+                            
                             all_tools.append(prefixed_tool)
                         self.tools_cache[server_name] = tools_result.tools
                     except Exception as e:

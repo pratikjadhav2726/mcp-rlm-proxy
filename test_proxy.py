@@ -33,8 +33,17 @@ async def test_proxy_connection():
                 
                 if tools_result.tools:
                     print("  Tool names:")
-                    for tool in tools_result.tools:
+                    for tool in tools_result.tools[:3]:  # Show first 3 tools
                         print(f"    - {tool.name}")
+                        # Check if _meta is in the schema
+                        schema = tool.inputSchema
+                        if isinstance(schema, dict) and "properties" in schema:
+                            if "_meta" in schema["properties"]:
+                                print(f"      ✓ Has _meta parameter (projection & grep support)")
+                            else:
+                                print(f"      ✗ Missing _meta parameter")
+                    if len(tools_result.tools) > 3:
+                        print(f"    ... and {len(tools_result.tools) - 3} more tools")
                 else:
                     print("  (No tools available - configure underlying servers in config.yaml)")
                 
