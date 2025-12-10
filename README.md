@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) proxy server that acts as an intermediary betwee
 
 ## Overview
 
-This proxy server builds on the ideas discussed in [GitHub issue #1709](https://github.com/modelcontextprotocol/servers/issues/1709) of the `modelcontextprotocol` repository. It enables:
+This proxy server builds on the ideas discussed in [GitHub Discussion #1709](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1709) of the `modelcontextprotocol` repository. It enables:
 
 - **Field Projection**: Request only specific fields from tool responses, reducing token usage by 85-95% in many cases
 - **Grep Search**: Filter tool outputs using regex patterns, extracting only relevant information
@@ -201,9 +201,30 @@ underlying_servers:
 ```
 
 **Configuration Fields:**
-- `name`: Unique identifier for the server (used in tool names as `name::tool_name`)
+- `name`: Unique identifier for the server (used in tool names as `name_tool_name`)
+  - Required: Yes
+  - Type: String
+  - Constraints: Must be unique, alphanumeric with underscores/hyphens only, 1-100 characters
 - `command`: Command to run the server (e.g., `npx`, `python`, `node`)
+  - Required: Yes
+  - Type: String
+  - Constraints: Cannot be empty
 - `args`: List of arguments to pass to the command
+  - Required: No (defaults to empty list)
+  - Type: List of strings
+- `env`: Optional environment variables dictionary
+  - Required: No
+  - Type: Dictionary of string key-value pairs
+
+**Configuration Validation:**
+The proxy server uses Pydantic for configuration validation, ensuring:
+- All required fields are present
+- Field types are correct
+- Server names are unique
+- Names and commands are properly formatted
+- Helpful error messages for invalid configurations
+
+If validation fails, the server will log detailed error messages and raise a `ValueError` with specific field-level error information.
 
 ## Usage
 
@@ -377,7 +398,8 @@ Example: A 10KB response reduced to 500 bytes = 95% token savings.
 ## Performance Considerations
 
 - **Latency**: Proxy adds minimal overhead (typically <10ms)
-- **Caching**: Future enhancement could cache responses for repeated queries
+- **Parallel Tool Discovery**: Tool listing from multiple servers is performed in parallel, providing up to 3x speedup when multiple servers need tool discovery
+- **Caching**: Tool definitions are cached to avoid repeated queries
 - **Async Processing**: All operations are asynchronous for optimal performance
 
 ## Development
@@ -392,7 +414,8 @@ mcp-proxy-server/
 │       ├── __main__.py      # Entry point
 │       ├── server.py        # Main server implementation
 │       ├── processors.py    # Projection and grep processors
-│       └── config.py        # Configuration loading
+│       ├── config.py        # Configuration loading
+│       └── logging_config.py # Logging configuration
 ├── tests/                   # Test files
 ├── examples/                # Example usage scripts
 ├── docs/                    # Additional documentation
@@ -409,6 +432,7 @@ mcp-proxy-server/
 - **`MCPProxyServer`**: Main server class that manages connections and tool calls (in `server.py`)
 - **`ProjectionProcessor`**: Handles field projection operations (in `processors.py`)
 - **`GrepProcessor`**: Handles grep search operations (in `processors.py`)
+- **`logging_config`**: Provides structured logging infrastructure (in `logging_config.py`)
 
 ### Development Setup
 
@@ -427,6 +451,41 @@ uv run pytest
 3. Run the server in development:
 ```bash
 uv run -m mcp_proxy
+```
+
+### Logging Configuration
+
+The proxy server uses structured logging. Control log verbosity using the `MCP_PROXY_LOG_LEVEL` environment variable:
+
+```bash
+# Set log level to DEBUG for detailed output
+export MCP_PROXY_LOG_LEVEL=DEBUG
+uv run -m mcp_proxy
+
+# Set log level to WARNING to reduce output
+export MCP_PROXY_LOG_LEVEL=WARNING
+uv run -m mcp_proxy
+```
+
+**Available log levels:**
+- `DEBUG`: Detailed diagnostic information (includes all operations)
+- `INFO`: General informational messages (default)
+- `WARNING`: Warning messages for potential issues
+- `ERROR`: Error messages for failures
+- `CRITICAL`: Critical errors that may cause the server to stop
+
+**Log Format:**
+```
+[LEVEL] module_name: message
+```
+
+Example output:
+```
+[INFO] mcp_proxy.server: Connected to underlying server: filesystem
+[INFO] mcp_proxy.server: Loaded 5 tools from filesystem
+[DEBUG] mcp_proxy.server: list_tools called
+[WARNING] mcp_proxy.config: Config file config.yaml not found. Using empty configuration.
+[ERROR] mcp_proxy.server: Error listing tools from server1: Connection timeout
 ```
 
 ### Testing
@@ -462,6 +521,12 @@ This project aligns with the MCP protocol specification and the ideas discussed 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Documentation
+
+- [Architecture Documentation](docs/ARCHITECTURE.md) - System architecture and design
+- [Logging Documentation](docs/LOGGING.md) - Logging configuration and usage
+- [Performance Documentation](docs/PERFORMANCE.md) - Performance characteristics and optimizations
 
 ## References
 
