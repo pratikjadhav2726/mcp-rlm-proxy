@@ -1,11 +1,14 @@
 """
 Configuration loading utilities with Pydantic validation.
+
+Uses MCP client-style JSON format (mcp.json) which matches the standard
+configuration format used by Claude Desktop and other MCP clients.
 """
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mcp_proxy.logging_config import get_logger
@@ -124,69 +127,138 @@ class ProxyConfig(BaseModel):
     )
 
 
-def load_config(config_path: str = "config.yaml") -> List[Dict[str, Any]]:
+def load_config(config_path: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Load and validate server configurations from YAML file.
-
+    Load and validate server configurations from mcp.json (MCP client format).
+    
     Args:
-        config_path: Path to the configuration file
+        config_path: Optional path to the configuration file
+                    If None, looks for mcp.json in current directory
 
     Returns:
         List of validated server configurations as dictionaries
 
     Raises:
         ValidationError: If configuration validation fails
-        FileNotFoundError: If config file doesn't exist (logged as warning, returns empty list)
+        FileNotFoundError: If no config file found (logged as warning, returns empty list)
+    """
+    # Determine which config file to use
+    if config_path:
+        config_file = Path(config_path)
+    else:
+        config_file = Path("mcp.json")
+    
+    if not config_file.exists():
+        logger.warning(f"Configuration file {config_file} not found.")
+        logger.warning("Using empty configuration (no servers).")
+        logger.info(f"Create {config_file} to configure underlying MCP servers.")
+        return []
+    
+    logger.info(f"Loading configuration from {config_file}")
+    
+    try:
+        return _load_json_config(config_file)
+    except (ValidationError, ValueError) as e:
+        # Re-raise validation errors with context
+        raise
+    except Exception as e:
+        error_msg = f"Failed to load {config_file}: {e}"
+        logger.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg) from e
+
+
+def _load_json_config(config_file: Path) -> List[Dict[str, Any]]:
+    """
+    Load configuration from MCP client-style JSON format.
+    
+    Expected format:
+    {
+      "mcpServers": {
+        "server_name": {
+          "command": "npx",
+          "args": ["-y", "package"],
+          "env": {"KEY": "value"}  // optional
+        }
+      }
+    }
     """
     try:
-        config_file = Path(config_path)
-        if not config_file.exists():
-            logger.warning(f"Config file {config_path} not found. Using empty configuration.")
-            return []
-
         with open(config_file, "r", encoding="utf-8") as f:
-            raw_config = yaml.safe_load(f)
-
+            raw_config = json.load(f)
+        
         # Handle empty or None config
-        if raw_config is None:
+        if raw_config is None or not raw_config:
             logger.info("Config file is empty. Using empty configuration.")
             return []
-
-        # Validate configuration with Pydantic
+        
+        # Extract mcpServers section
+        if "mcpServers" not in raw_config:
+            raise ValueError(
+                f"Invalid configuration in {config_file}: "
+                "Missing 'mcpServers' key. "
+                "Expected format: {\"mcpServers\": {\"server_name\": {...}}}"
+            )
+        
+        mcp_servers = raw_config["mcpServers"]
+        if not isinstance(mcp_servers, dict):
+            raise ValueError(
+                f"Invalid configuration in {config_file}: "
+                "'mcpServers' must be an object/dictionary"
+            )
+        
+        # Convert MCP client format to internal format
+        servers = []
+        for server_name, server_config in mcp_servers.items():
+            if not isinstance(server_config, dict):
+                logger.warning(f"Skipping invalid server config for '{server_name}': not a dictionary")
+                continue
+            
+            # Build server configuration
+            server_dict = {
+                "name": server_name,
+                "command": server_config.get("command"),
+                "args": server_config.get("args", []),
+            }
+            
+            # Add env if present
+            if "env" in server_config:
+                server_dict["env"] = server_config["env"]
+            
+            servers.append(server_dict)
+        
+        # Validate with Pydantic
         try:
-            proxy_config = ProxyConfig.model_validate(raw_config)
-            logger.debug(f"Successfully loaded and validated {len(proxy_config.underlying_servers)} server(s)")
-
-            # Convert Pydantic models to dictionaries for backward compatibility
+            # Convert list to ProxyConfig format for validation
+            proxy_config = ProxyConfig(underlying_servers=[
+                ServerConfig.model_validate(s) for s in servers
+            ])
+            logger.info(f"Successfully loaded {len(proxy_config.underlying_servers)} server(s) from {config_file}")
             return [server.model_dump() for server in proxy_config.underlying_servers]
-
+        
         except ValidationError as e:
             logger.error(f"Configuration validation failed: {e}")
-            # Provide helpful error messages
             errors = []
             for error in e.errors():
                 field_path = " -> ".join(str(loc) for loc in error["loc"])
                 error_msg = error["msg"]
                 errors.append(f"  {field_path}: {error_msg}")
-
+            
             error_message = "Configuration validation errors:\n" + "\n".join(errors)
             logger.error(error_message)
-            # Re-raise with better context as ValueError
-            raise ValueError(f"Invalid configuration in {config_path}:\n{error_message}") from e
-
-    except FileNotFoundError:
-        # Already handled above, but keep for safety
-        logger.warning(f"Config file {config_path} not found. Using empty configuration.")
-        return []
-    except (ValidationError, ValueError):
-        # Re-raise validation errors (ValueError is our wrapped ValidationError)
-        raise
-    except yaml.YAMLError as e:
-        error_msg = f"YAML parsing error in {config_path}: {e}"
+            raise ValueError(f"Invalid configuration in {config_file}:\n{error_message}") from e
+    
+    except json.JSONDecodeError as e:
+        error_msg = f"JSON parsing error in {config_file}: {e}"
         logger.error(error_msg, exc_info=True)
         raise ValueError(error_msg) from e
+    except FileNotFoundError:
+        logger.warning(f"Config file {config_file} not found.")
+        return []
+    except (ValidationError, ValueError):
+        raise
     except Exception as e:
-        error_msg = f"Unexpected error loading config from {config_path}: {e}"
+        error_msg = f"Unexpected error loading config from {config_file}: {e}"
         logger.error(error_msg, exc_info=True)
         raise RuntimeError(error_msg) from e
+
 

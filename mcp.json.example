@@ -1,0 +1,29 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema/mcp-config.json",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"]
+    },
+    "git": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-git", "/path/to/git/repo"]
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "your-api-key-here"
+      }
+    },
+    "python-server": {
+      "command": "python",
+      "args": ["-m", "my_mcp_server"]
+    },
+    "uv-server": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "my_mcp_server"]
+    }
+  }
+}
+

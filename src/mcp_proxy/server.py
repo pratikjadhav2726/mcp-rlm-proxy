@@ -21,6 +21,65 @@ from mcp_proxy.processors import GrepProcessor, ProjectionProcessor
 logger = get_logger(__name__)
 
 
+class ConnectionPoolMetrics:
+    """Tracks metrics for connection pool and token savings."""
+    
+    def __init__(self):
+        self.total_calls = 0
+        self.total_original_tokens = 0
+        self.total_filtered_tokens = 0
+        self.projection_calls = 0
+        self.grep_calls = 0
+        self.connection_count = 0
+        self.failed_connections = 0
+        
+    def record_call(self, original_tokens: int, filtered_tokens: int, 
+                   used_projection: bool = False, used_grep: bool = False):
+        """Record a tool call with token metrics."""
+        self.total_calls += 1
+        self.total_original_tokens += original_tokens
+        self.total_filtered_tokens += filtered_tokens
+        if used_projection:
+            self.projection_calls += 1
+        if used_grep:
+            self.grep_calls += 1
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """Get summary statistics."""
+        if self.total_original_tokens == 0:
+            savings_percent = 0
+        else:
+            savings_percent = ((self.total_original_tokens - self.total_filtered_tokens) 
+                             / self.total_original_tokens * 100)
+        
+        return {
+            "total_calls": self.total_calls,
+            "projection_calls": self.projection_calls,
+            "grep_calls": self.grep_calls,
+            "total_original_tokens": self.total_original_tokens,
+            "total_filtered_tokens": self.total_filtered_tokens,
+            "tokens_saved": self.total_original_tokens - self.total_filtered_tokens,
+            "savings_percent": round(savings_percent, 2),
+            "active_connections": self.connection_count,
+            "failed_connections": self.failed_connections
+        }
+    
+    def log_summary(self):
+        """Log summary statistics."""
+        summary = self.get_summary()
+        if summary["total_calls"] > 0:
+            logger.info(f"=== Proxy Performance Summary ===")
+            logger.info(f"  Total calls: {summary['total_calls']}")
+            logger.info(f"  Projection calls: {summary['projection_calls']}")
+            logger.info(f"  Grep calls: {summary['grep_calls']}")
+            logger.info(f"  Original tokens: {summary['total_original_tokens']}")
+            logger.info(f"  Filtered tokens: {summary['total_filtered_tokens']}")
+            logger.info(f"  Tokens saved: {summary['tokens_saved']}")
+            logger.info(f"  Savings: {summary['savings_percent']:.1f}%")
+            logger.info(f"  Active connections: {summary['active_connections']}")
+            logger.info(f"  Failed connections: {summary['failed_connections']}")
+
+
 class MCPProxyServer:
     """MCP Proxy Server that intermediates between clients and underlying servers."""
 
@@ -40,6 +99,8 @@ class MCPProxyServer:
         # Store context managers and tasks to keep connections alive
         self._server_contexts: Dict[str, Any] = {}
         self._connection_tasks: Dict[str, asyncio.Task] = {}
+        # Metrics tracking
+        self.metrics = ConnectionPoolMetrics()
 
         # Register handlers
         self._register_handlers()
@@ -379,6 +440,12 @@ class MCPProxyServer:
                     "new_size": new_size,
                     "savings_percent": round(savings_percent, 2),
                 }
+                logger.info(f"Token savings: {original_size} → {new_size} tokens ({savings_percent:.1f}% reduction)")
+            
+            # Record metrics
+            used_projection = "projection" in meta if meta else False
+            used_grep = "grep" in meta if meta else False
+            self.metrics.record_call(original_size, new_size, used_projection, used_grep)
 
             return content
 
@@ -433,6 +500,9 @@ class MCPProxyServer:
                         # Store session immediately
                         self.underlying_servers[server_name] = session
                         logger.debug(f"Background task: Session stored for {server_name}")
+                        
+                        # Update metrics
+                        self.metrics.connection_count += 1
 
                         # Pre-load tools
                         try:
@@ -530,11 +600,16 @@ class MCPProxyServer:
 
             except Exception as e:
                 logger.error(f"Failed to start connection to {server_name}: {e}", exc_info=True)
+                self.metrics.failed_connections += 1
 
     async def cleanup(self):
         """Clean up connections to underlying servers."""
         try:
             logger.info("Cleaning up connections...")
+            
+            # Log metrics summary before cleanup
+            self.metrics.log_summary()
+            
             # Close all context managers
             for server_name, session_obj in list(self._server_contexts.items()):
                 try:

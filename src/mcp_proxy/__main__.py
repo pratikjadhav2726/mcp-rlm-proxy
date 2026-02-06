@@ -24,12 +24,12 @@ async def async_main():
     from mcp_proxy.config import load_config
     from mcp_proxy.server import MCPProxyServer
 
-    # Load server configurations from config file
-    # Look for config.yaml in the current directory or project root
-    config_path = Path("config.yaml")
+    # Load server configurations from mcp.json
+    # Look for mcp.json in the current directory or project root
+    config_path = Path("mcp.json")
     if not config_path.exists():
         # Try project root (one level up from src/)
-        config_path = Path(__file__).parent.parent.parent / "config.yaml"
+        config_path = Path(__file__).parent.parent.parent / "mcp.json"
 
     underlying_servers = load_config(str(config_path))
     proxy = MCPProxyServer(underlying_servers)
