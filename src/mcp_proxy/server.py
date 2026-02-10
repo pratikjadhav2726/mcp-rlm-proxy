@@ -24,6 +24,7 @@ from mcp.types import Content, TextContent, Tool, ServerCapabilities
 
 from mcp_proxy.cache import SmartCacheManager
 from mcp_proxy.config import ProxySettings
+from mcp_proxy.executor_manager import ExecutorManager
 from mcp_proxy.logging_config import get_logger
 from mcp_proxy.processors import (
     GrepProcessor,
@@ -142,9 +143,12 @@ class MCPProxyServer:
         self.server_configs = underlying_servers or []
         self.tools_cache: Dict[str, List[Tool]] = {}
 
-        # Processors
-        self.projection_processor = ProjectionProcessor()
-        self.grep_processor = GrepProcessor()
+        # Executor for CPU-bound work
+        self.executor_manager = ExecutorManager()
+        
+        # Processors with executor
+        self.projection_processor = ProjectionProcessor(self.executor_manager)
+        self.grep_processor = GrepProcessor(self.executor_manager)
         self.pipeline = ProcessorPipeline([self.projection_processor, self.grep_processor])
 
         # Response cache
@@ -298,7 +302,8 @@ class MCPProxyServer:
                     specs["grep"] = meta["grep"]
                 if specs:
                     try:
-                        pipe_result = self.pipeline.execute(content, specs)
+                        # Use async pipeline execution
+                        pipe_result = await self.pipeline.execute_async(content, specs)
                         content = pipe_result.content
                     except Exception as exc:
                         msg = f"Error applying _meta transformations: {exc}"
@@ -313,7 +318,7 @@ class MCPProxyServer:
                 self.settings.enable_auto_truncation
                 and new_size > self.settings.max_response_size
             ):
-                cache_id = self.cache.put(content, name, arguments)
+                cache_id = await self.cache.put(content, name, arguments)
                 truncated_text = self._truncate_content(content, self.settings.max_response_size)
                 hint = (
                     f"\n\n--- Response truncated ({new_size:,} chars). "
@@ -496,7 +501,7 @@ class MCPProxyServer:
         tool = arguments.get("tool")
 
         if cache_id:
-            cached = self.cache.get(cache_id)
+            cached = await self.cache.get(cache_id)
             if cached is None:
                 raise ValueError(
                     f"Cache entry '{cache_id}' not found or expired. "
@@ -514,7 +519,7 @@ class MCPProxyServer:
                 )
                 content = list(result.content) if hasattr(result, "content") else []
                 # Cache the fresh result for potential follow-up
-                cid = self.cache.put(content, tool, tool_args)
+                cid = await self.cache.put(content, tool, tool_args)
                 logger.debug("Fresh call cached as %s", cid)
                 return content
             except asyncio.TimeoutError:
@@ -545,7 +550,8 @@ class MCPProxyServer:
             return [TextContent(type="text", text="Error: Provide 'fields' or 'exclude' to filter.")]
 
         spec = {"mode": mode, "fields": projection_fields}
-        result = self.projection_processor.process(content, spec)
+        # Use async version
+        result = await self.projection_processor.process_async(content, spec)
 
         self.metrics.record_call(
             result.original_size, result.filtered_size, used_projection=True
@@ -582,7 +588,8 @@ class MCPProxyServer:
         if mode == "bm25":
             grep_spec["query"] = pattern
 
-        result = self.grep_processor.process(content, grep_spec)
+        # Use async version
+        result = await self.grep_processor.process_async(content, grep_spec)
         self.metrics.record_call(
             result.original_size, result.filtered_size, used_grep=True
         )
@@ -594,7 +601,8 @@ class MCPProxyServer:
         max_depth = arguments.get("max_depth", 3)
 
         grep_spec = {"mode": "structure", "maxDepth": max_depth}
-        result = self.grep_processor.process(content, grep_spec)
+        # Use async version
+        result = await self.grep_processor.process_async(content, grep_spec)
         return result.content
 
     # ------------------------------------------------------------------
@@ -789,6 +797,9 @@ class MCPProxyServer:
             logger.info("Cleaning up connections...")
             self.metrics.log_summary()
             
+            # Shutdown executor
+            self.executor_manager.shutdown(wait=True)
+            
             for server_name, session_obj in list(self._server_contexts.items()):
                 try:
                     await session_obj.__aexit__(None, None, None)
@@ -806,13 +817,17 @@ class MCPProxyServer:
             self._connection_tasks.clear()
             self.underlying_servers.clear()
             self.tools_cache.clear()
-            self.cache.clear()
+            await self.cache.clear()
         except Exception:
             pass
 
     async def run(self) -> None:
         """Run the proxy server."""
         try:
+            # Set event loop for executor
+            loop = asyncio.get_event_loop()
+            self.executor_manager.set_event_loop(loop)
+            
             await self.initialize_underlying_servers()
 
             capabilities = ServerCapabilities.model_validate({

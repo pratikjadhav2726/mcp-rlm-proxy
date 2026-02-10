@@ -8,6 +8,7 @@ Provides a ``BaseProcessor`` ABC, concrete ``ProjectionProcessor`` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
@@ -22,6 +23,7 @@ from mcp_proxy.advanced_search import (
     FuzzyMatcher,
     StructureNavigator,
 )
+from mcp_proxy.executor_manager import ExecutorManager
 from mcp_proxy.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -68,6 +70,24 @@ class BaseProcessor(ABC):
         Returns:
             A ``ProcessorResult`` containing the filtered content and metadata.
         """
+    
+    async def process_async(
+        self, content: List[Content], spec: Dict[str, Any]
+    ) -> ProcessorResult:
+        """
+        Async version of process. Default implementation calls sync version.
+        
+        Override in subclasses to provide async implementation.
+        """
+        # Default: run sync version in executor if available
+        if hasattr(self, 'executor_manager') and self.executor_manager:
+            from functools import partial
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.executor_manager.executor,
+                partial(self.process, content, spec)
+            )
+        return self.process(content, spec)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +98,10 @@ class ProjectionProcessor(BaseProcessor):
     """Handles field projection operations on tool responses."""
 
     name: str = "projection"
+
+    def __init__(self, executor_manager: Optional[ExecutorManager] = None) -> None:
+        """Initialize projection processor with optional executor manager."""
+        self.executor_manager = executor_manager
 
     # -- BaseProcessor interface -------------------------------------------
 
@@ -94,6 +118,35 @@ class ProjectionProcessor(BaseProcessor):
 
         original_size = _measure_content(content)
         projected = self.project_content(content, spec)
+        filtered_size = _measure_content(projected)
+
+        return ProcessorResult(
+            content=projected,
+            original_size=original_size,
+            filtered_size=filtered_size,
+            metadata={
+                "applied": True,
+                "mode": mode,
+                "fields": fields,
+            },
+        )
+
+    async def process_async(
+        self, content: List[Content], spec: Dict[str, Any]
+    ) -> ProcessorResult:
+        """Async version that offloads JSON parsing and projection to thread pool."""
+        mode = spec.get("mode", "include")
+        fields = spec.get("fields", [])
+
+        if mode not in ("include", "exclude", "view"):
+            raise ValueError(
+                f"Invalid projection mode: {mode}. Must be 'include', 'exclude', or 'view'"
+            )
+        if not fields and mode != "view":
+            raise ValueError("Projection requires a non-empty 'fields' list")
+
+        original_size = _measure_content(content)
+        projected = await self.project_content_async(content, spec)
         filtered_size = _measure_content(projected)
 
         return ProcessorResult(
@@ -173,6 +226,49 @@ class ProjectionProcessor(BaseProcessor):
                 projected.append(item)
             else:
                 projected.append(item)
+        return projected
+
+    async def project_content_async(
+        self, content: List[Content], projection: Dict[str, Any]
+    ) -> List[Content]:
+        """Async version that offloads JSON parsing and projection to thread pool."""
+        projected: List[Content] = []
+        
+        for item in content:
+            if isinstance(item, TextContent):
+                try:
+                    # Offload JSON parsing to thread pool
+                    if self.executor_manager:
+                        data = await self.executor_manager.run_cpu_bound(json.loads, item.text)
+                    else:
+                        data = json.loads(item.text)
+                    
+                    if isinstance(data, (dict, list)):
+                        # Projection itself can be CPU-bound for large structures
+                        if self.executor_manager:
+                            projected_data = await self.executor_manager.run_cpu_bound(
+                                self.apply_projection,
+                                data,
+                                projection
+                            )
+                            projected_text = await self.executor_manager.run_cpu_bound(
+                                lambda d: json.dumps(d, indent=2),
+                                projected_data
+                            )
+                        else:
+                            projected_data = self.apply_projection(data, projection)
+                            projected_text = json.dumps(projected_data, indent=2)
+                        
+                        projected.append(TextContent(type="text", text=projected_text))
+                    else:
+                        projected.append(item)
+                except json.JSONDecodeError:
+                    projected.append(item)
+            elif isinstance(item, ImageContent):
+                projected.append(item)
+            else:
+                projected.append(item)
+        
         return projected
 
     # -- Internal helpers --------------------------------------------------
@@ -304,11 +400,13 @@ class GrepProcessor(BaseProcessor):
 
     name: str = "grep"
 
-    def __init__(self) -> None:
+    def __init__(self, executor_manager: Optional[ExecutorManager] = None) -> None:
+        """Initialize grep processor with optional executor manager."""
         self.bm25 = BM25Processor()
         self.fuzzy = FuzzyMatcher()
         self.context_extractor = ContextExtractor()
         self.navigator = StructureNavigator()
+        self.executor_manager = executor_manager
 
         # Strategy map – each value is a bound method
         self._strategies: Dict[str, Any] = {
@@ -318,12 +416,40 @@ class GrepProcessor(BaseProcessor):
             "context": self._apply_context_search,
             "structure": self._apply_structure_navigation,
         }
+        
+        # Async strategy map
+        self._async_strategies: Dict[str, Any] = {
+            "regex": self._apply_regex_search_async,
+            "bm25": self._apply_bm25_search_async,
+            "fuzzy": self._apply_fuzzy_search_async,
+            "context": self._apply_context_search_async,
+            "structure": self._apply_structure_navigation_async,
+        }
 
     # -- BaseProcessor interface -------------------------------------------
 
     def process(self, content: List[Content], spec: Dict[str, Any]) -> ProcessorResult:
         original_size = _measure_content(content)
         filtered = self.apply_grep(content, spec)
+        filtered_size = _measure_content(filtered)
+
+        return ProcessorResult(
+            content=filtered,
+            original_size=original_size,
+            filtered_size=filtered_size,
+            metadata={
+                "applied": True,
+                "mode": spec.get("mode", "regex"),
+                "pattern": spec.get("pattern") or spec.get("query"),
+            },
+        )
+
+    async def process_async(
+        self, content: List[Content], spec: Dict[str, Any]
+    ) -> ProcessorResult:
+        """Async version that offloads CPU-bound work to thread pool."""
+        original_size = _measure_content(content)
+        filtered = await self.apply_grep_async(content, spec)
         filtered_size = _measure_content(filtered)
 
         return ProcessorResult(
@@ -359,6 +485,22 @@ class GrepProcessor(BaseProcessor):
             ]
         return handler(content, grep_spec)
 
+    async def apply_grep_async(
+        self, content: List[Content], grep_spec: Dict[str, Any]
+    ) -> List[Content]:
+        """Async version that offloads CPU-bound work to thread pool."""
+        search_mode = grep_spec.get("mode", "regex")
+        handler = self._async_strategies.get(search_mode)
+        if handler is None:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Unknown search mode '{search_mode}'. "
+                    f"Supported: {', '.join(self._async_strategies)}",
+                )
+            ]
+        return await handler(content, grep_spec)
+
     # -- Strategy implementations ------------------------------------------
 
     def _apply_bm25_search(
@@ -392,6 +534,57 @@ class GrepProcessor(BaseProcessor):
 
         return results if results else [TextContent(type="text", text="No relevant results found.")]
 
+    async def _apply_bm25_search_async(
+        self, content: List[Content], grep_spec: Dict[str, Any]
+    ) -> List[Content]:
+        """Async BM25 search that offloads CPU work to thread pool."""
+        query = grep_spec.get("query") or grep_spec.get("pattern", "")
+        top_k = grep_spec.get("topK", 5)
+        chunk_size = grep_spec.get("chunkSize", 500)
+
+        if not query:
+            return [TextContent(type="text", text="Error: BM25 search requires 'query' parameter")]
+
+        results: List[Content] = []
+        for item in content:
+            if not isinstance(item, TextContent):
+                continue
+            
+            text = item.text
+            try:
+                # Offload JSON parsing
+                if self.executor_manager:
+                    data = await self.executor_manager.run_cpu_bound(json.loads, text)
+                    text = await self.executor_manager.run_cpu_bound(
+                        lambda d: json.dumps(d, indent=2), data
+                    )
+                else:
+                    data = json.loads(text)
+                    text = json.dumps(data, indent=2)
+            except json.JSONDecodeError:
+                pass
+
+            # Offload BM25 ranking to thread pool
+            if self.executor_manager:
+                ranked_chunks = await self.executor_manager.run_cpu_bound(
+                    self.bm25.rank_chunks,
+                    text,
+                    query,
+                    chunk_size,
+                    top_k
+                )
+            else:
+                ranked_chunks = self.bm25.rank_chunks(text, query, chunk_size, top_k)
+            
+            if ranked_chunks:
+                result_text = f"BM25 Search Results (query: '{query}', top {len(ranked_chunks)} of {top_k}):\n\n"
+                for i, chunk_data in enumerate(ranked_chunks, 1):
+                    result_text += f"=== Result {i} (Score: {chunk_data['score']:.4f}) ===\n"
+                    result_text += f"{chunk_data['chunk']}\n\n"
+                results.append(TextContent(type="text", text=result_text))
+
+        return results if results else [TextContent(type="text", text="No relevant results found.")]
+
     def _apply_fuzzy_search(
         self, content: List[Content], grep_spec: Dict[str, Any]
     ) -> List[Content]:
@@ -407,6 +600,44 @@ class GrepProcessor(BaseProcessor):
             if not isinstance(item, TextContent):
                 continue
             matches = self.fuzzy.fuzzy_search(item.text, pattern, threshold, max_matches)
+            if matches:
+                result_text = f"Fuzzy Search Results (pattern: '{pattern}', threshold: {threshold}):\n\n"
+                for i, match in enumerate(matches, 1):
+                    result_text += f"=== Match {i} (Similarity: {match['similarity']:.2%}) ===\n"
+                    result_text += f"Found: \"{match['match']}\"\n"
+                    result_text += f"Context: ...{match['context']}...\n\n"
+                results.append(TextContent(type="text", text=result_text))
+
+        return results if results else [TextContent(type="text", text="No fuzzy matches found.")]
+
+    async def _apply_fuzzy_search_async(
+        self, content: List[Content], grep_spec: Dict[str, Any]
+    ) -> List[Content]:
+        """Async fuzzy search that offloads CPU work to thread pool."""
+        pattern = grep_spec.get("pattern", "")
+        threshold = grep_spec.get("threshold", 0.7)
+        max_matches = grep_spec.get("maxMatches", 10)
+
+        if not pattern:
+            return [TextContent(type="text", text="Error: Fuzzy search requires 'pattern' parameter")]
+
+        results: List[Content] = []
+        for item in content:
+            if not isinstance(item, TextContent):
+                continue
+            
+            # Offload fuzzy matching to thread pool
+            if self.executor_manager:
+                matches = await self.executor_manager.run_cpu_bound(
+                    self.fuzzy.fuzzy_search,
+                    item.text,
+                    pattern,
+                    threshold,
+                    max_matches
+                )
+            else:
+                matches = self.fuzzy.fuzzy_search(item.text, pattern, threshold, max_matches)
+            
             if matches:
                 result_text = f"Fuzzy Search Results (pattern: '{pattern}', threshold: {threshold}):\n\n"
                 for i, match in enumerate(matches, 1):
@@ -443,6 +674,45 @@ class GrepProcessor(BaseProcessor):
 
         return results if results else [TextContent(type="text", text="No contextual matches found.")]
 
+    async def _apply_context_search_async(
+        self, content: List[Content], grep_spec: Dict[str, Any]
+    ) -> List[Content]:
+        """Async context search that offloads CPU work to thread pool."""
+        pattern = grep_spec.get("pattern", "")
+        context_type = grep_spec.get("contextType", "paragraph")
+        max_matches = grep_spec.get("maxMatches", 5)
+
+        if not pattern:
+            return [TextContent(type="text", text="Error: Context search requires 'pattern' parameter")]
+
+        results: List[Content] = []
+        for item in content:
+            if not isinstance(item, TextContent):
+                continue
+            
+            # Offload context extraction to thread pool
+            if self.executor_manager:
+                matches = await self.executor_manager.run_cpu_bound(
+                    self.context_extractor.extract_with_context,
+                    item.text,
+                    pattern,
+                    context_type,
+                    max_matches
+                )
+            else:
+                matches = self.context_extractor.extract_with_context(
+                    item.text, pattern, context_type, max_matches
+                )
+            
+            if matches:
+                result_text = f"Context Search Results (pattern: '{pattern}', context: {context_type}):\n\n"
+                for i, match in enumerate(matches, 1):
+                    result_text += f"=== {context_type.capitalize()} {i} ({match['matches']} match(es)) ===\n"
+                    result_text += f"{match['context']}\n\n"
+                results.append(TextContent(type="text", text=result_text))
+
+        return results if results else [TextContent(type="text", text="No contextual matches found.")]
+
     def _apply_structure_navigation(
         self, content: List[Content], grep_spec: Dict[str, Any]
     ) -> List[Content]:
@@ -462,6 +732,71 @@ class GrepProcessor(BaseProcessor):
                 result_text += f"Statistics:\n{json.dumps(summary['statistics'], indent=2)}\n"
                 results.append(TextContent(type="text", text=result_text))
             except json.JSONDecodeError:
+                text = item.text
+                result_text = "Text Structure Summary:\n\n"
+                result_text += f"Length: {len(text)} characters\n"
+                result_text += f"Lines: {len(text.split(chr(10)))}\n"
+                result_text += f"Words: {len(text.split())}\n"
+                result_text += f"First 200 chars: {text[:200]}...\n"
+                results.append(TextContent(type="text", text=result_text))
+
+        return results if results else [TextContent(type="text", text="No content to navigate.")]
+
+    async def _apply_structure_navigation_async(
+        self, content: List[Content], grep_spec: Dict[str, Any]
+    ) -> List[Content]:
+        """Async structure navigation that offloads CPU work to thread pool."""
+        max_depth = grep_spec.get("maxDepth", 3)
+        results: List[Content] = []
+        
+        for item in content:
+            if not isinstance(item, TextContent):
+                continue
+            
+            try:
+                # Offload JSON parsing and structure analysis
+                if self.executor_manager:
+                    data = await self.executor_manager.run_cpu_bound(json.loads, item.text)
+                    summary = await self.executor_manager.run_cpu_bound(
+                        self.navigator.get_structure_summary,
+                        data,
+                        max_depth
+                    )
+                else:
+                    data = json.loads(item.text)
+                    summary = self.navigator.get_structure_summary(data, max_depth)
+                
+                # JSON dumps can also be CPU-bound for large structures
+                if self.executor_manager:
+                    result_text = "Structure Navigation Summary:\n\n"
+                    result_text += f"Type: {summary['type']}\n"
+                    size_str = await self.executor_manager.run_cpu_bound(
+                        lambda s: json.dumps(s, indent=2), summary['size']
+                    )
+                    result_text += f"Size: {size_str}\n\n"
+                    keys_str = await self.executor_manager.run_cpu_bound(
+                        lambda s: json.dumps(s, indent=2), summary['keys']
+                    )
+                    result_text += f"Structure:\n{keys_str}\n\n"
+                    sample_str = await self.executor_manager.run_cpu_bound(
+                        lambda s: json.dumps(s, indent=2), summary['sample']
+                    )
+                    result_text += f"Sample Data:\n{sample_str}\n\n"
+                    stats_str = await self.executor_manager.run_cpu_bound(
+                        lambda s: json.dumps(s, indent=2), summary['statistics']
+                    )
+                    result_text += f"Statistics:\n{stats_str}\n"
+                else:
+                    result_text = "Structure Navigation Summary:\n\n"
+                    result_text += f"Type: {summary['type']}\n"
+                    result_text += f"Size: {json.dumps(summary['size'], indent=2)}\n\n"
+                    result_text += f"Structure:\n{json.dumps(summary['keys'], indent=2)}\n\n"
+                    result_text += f"Sample Data:\n{json.dumps(summary['sample'], indent=2)}\n\n"
+                    result_text += f"Statistics:\n{json.dumps(summary['statistics'], indent=2)}\n"
+                
+                results.append(TextContent(type="text", text=result_text))
+            except json.JSONDecodeError:
+                # For non-JSON text, structure analysis is lightweight
                 text = item.text
                 result_text = "Text Structure Summary:\n\n"
                 result_text += f"Length: {len(text)} characters\n"
@@ -539,6 +874,124 @@ class GrepProcessor(BaseProcessor):
                     text_matches, match_lines = GrepProcessor._search_in_text(
                         text, regex, max_matches, match_count, context_before, context_after, multiline
                     )
+                    if text_matches:
+                        filtered.append(TextContent(type="text", text=text_matches))
+                        match_count += match_lines
+
+            if max_matches and match_count >= max_matches:
+                break
+
+        return filtered if filtered else [TextContent(type="text", text="No matches found.")]
+
+    async def _apply_regex_search_async(
+        self, content: List[Content], grep_spec: Dict[str, Any]
+    ) -> List[Content]:
+        """Async regex search that offloads CPU work to thread pool."""
+        pattern = grep_spec.get("pattern", "")
+        case_insensitive = grep_spec.get("caseInsensitive", False)
+        max_matches = grep_spec.get("maxMatches")
+        target = grep_spec.get("target", "content")
+        multiline = grep_spec.get("multiline", False)
+
+        context_lines = grep_spec.get("contextLines", {})
+        context_before = context_lines.get("before", 0) if isinstance(context_lines, dict) else 0
+        context_after = context_lines.get("after", 0) if isinstance(context_lines, dict) else 0
+        context_both = context_lines.get("both", 0) if isinstance(context_lines, dict) else 0
+        if context_both > 0:
+            context_before = context_both
+            context_after = context_both
+
+        if not pattern:
+            return content
+
+        try:
+            flags = re.IGNORECASE if case_insensitive else 0
+            if multiline:
+                flags |= re.MULTILINE | re.DOTALL
+            regex = re.compile(pattern, flags)
+        except re.error as e:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Invalid regex pattern '{pattern}': {e}",
+                )
+            ]
+
+        filtered: List[Content] = []
+        match_count = 0
+
+        for item in content:
+            if isinstance(item, TextContent):
+                text = item.text
+
+                if target == "structuredContent":
+                    try:
+                        # Offload JSON parsing
+                        if self.executor_manager:
+                            data = await self.executor_manager.run_cpu_bound(json.loads, text)
+                            # Offload structured search
+                            matches = await self.executor_manager.run_cpu_bound(
+                                self._search_in_structure,
+                                data,
+                                regex,
+                                max_matches,
+                                match_count
+                            )
+                        else:
+                            data = json.loads(text)
+                            matches = self._search_in_structure(data, regex, max_matches, match_count)
+                        
+                        if matches is not None and matches != {} and matches != []:
+                            if self.executor_manager:
+                                result_text = await self.executor_manager.run_cpu_bound(
+                                    lambda m: json.dumps(m, indent=2), matches
+                                )
+                            else:
+                                result_text = json.dumps(matches, indent=2)
+                            filtered.append(TextContent(type="text", text=result_text))
+                            if isinstance(matches, list):
+                                match_count += len(matches)
+                            elif isinstance(matches, dict):
+                                match_count += self._count_dict_matches(matches)
+                            else:
+                                match_count += 1
+                    except json.JSONDecodeError:
+                        # Fallback to text search
+                        if self.executor_manager:
+                            text_matches, match_lines = await self.executor_manager.run_cpu_bound(
+                                self._search_in_text,
+                                text,
+                                regex,
+                                max_matches,
+                                match_count,
+                                context_before,
+                                context_after,
+                                multiline
+                            )
+                        else:
+                            text_matches, match_lines = self._search_in_text(
+                                text, regex, max_matches, match_count, context_before, context_after, multiline
+                            )
+                        if text_matches:
+                            filtered.append(TextContent(type="text", text=text_matches))
+                            match_count += match_lines
+                else:
+                    # Offload text search for large texts
+                    if self.executor_manager and len(text) > 10000:
+                        text_matches, match_lines = await self.executor_manager.run_cpu_bound(
+                            self._search_in_text,
+                            text,
+                            regex,
+                            max_matches,
+                            match_count,
+                            context_before,
+                            context_after,
+                            multiline
+                        )
+                    else:
+                        text_matches, match_lines = self._search_in_text(
+                            text, regex, max_matches, match_count, context_before, context_after, multiline
+                        )
                     if text_matches:
                         filtered.append(TextContent(type="text", text=text_matches))
                         match_count += match_lines
@@ -699,7 +1152,7 @@ class ProcessorPipeline:
     def execute(
         self, content: List[Content], specs: Dict[str, Dict[str, Any]]
     ) -> ProcessorResult:
-        """Run the pipeline, returning a merged ``ProcessorResult``."""
+        """Run the pipeline synchronously, returning a merged ``ProcessorResult``."""
         current_content = content
         original_size = _measure_content(content)
         total_metadata: Dict[str, Any] = {}
@@ -709,6 +1162,36 @@ class ProcessorPipeline:
             if key not in specs:
                 continue
             proc_result = processor.process(current_content, specs[key])
+            current_content = proc_result.content
+            total_metadata[key] = proc_result.metadata
+
+        filtered_size = _measure_content(current_content)
+        return ProcessorResult(
+            content=current_content,
+            original_size=original_size,
+            filtered_size=filtered_size,
+            metadata=total_metadata,
+        )
+
+    async def execute_async(
+        self, content: List[Content], specs: Dict[str, Dict[str, Any]]
+    ) -> ProcessorResult:
+        """Run the pipeline asynchronously, returning a merged ``ProcessorResult``."""
+        current_content = content
+        original_size = _measure_content(content)
+        total_metadata: Dict[str, Any] = {}
+
+        for processor in self.processors:
+            key = processor.name
+            if key not in specs:
+                continue
+            
+            # Use async version if available, otherwise fall back to sync
+            if hasattr(processor, 'process_async'):
+                proc_result = await processor.process_async(current_content, specs[key])
+            else:
+                proc_result = processor.process(current_content, specs[key])
+            
             current_content = proc_result.content
             total_metadata[key] = proc_result.metadata
 

@@ -6,6 +6,7 @@ storing large tool responses that can be explored incrementally
 by agents via proxy tools.
 """
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -71,12 +72,13 @@ class SmartCacheManager:
         self._entries: Dict[str, CacheEntry] = {}
         self.max_entries = max_entries
         self.ttl_seconds = ttl_seconds
+        self._lock = asyncio.Lock()  # Async lock for thread-safe access
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def put(self, content: List[Content], tool_name: str, arguments: Dict[str, Any]) -> str:
+    async def put(self, content: List[Content], tool_name: str, arguments: Dict[str, Any]) -> str:
         """
         Store content and return a short UUID-based cache_id.
 
@@ -88,82 +90,87 @@ class SmartCacheManager:
         Returns:
             A short cache ID string (first 12 chars of UUID4).
         """
-        self._evict_expired()
-        self._evict_if_full()
+        async with self._lock:
+            self._evict_expired()
+            self._evict_if_full()
 
-        cache_id = uuid.uuid4().hex[:12]
-        now = time.monotonic()
-        size_bytes = sum(
-            len(item.text) for item in content if isinstance(item, TextContent)
-        )
+            cache_id = uuid.uuid4().hex[:12]
+            now = time.monotonic()
+            size_bytes = sum(
+                len(item.text) for item in content if isinstance(item, TextContent)
+            )
 
-        entry = CacheEntry(
-            cache_id=cache_id,
-            content=content,
-            tool_name=tool_name,
-            arguments=arguments,
-            created_at=now,
-            last_accessed_at=now,
-            access_count=0,
-            size_bytes=size_bytes,
-        )
-        self._entries[cache_id] = entry
-        logger.debug(
-            "Cached result for %s (%d bytes) → cache_id=%s",
-            tool_name,
-            size_bytes,
-            cache_id,
-        )
-        return cache_id
+            entry = CacheEntry(
+                cache_id=cache_id,
+                content=content,
+                tool_name=tool_name,
+                arguments=arguments,
+                created_at=now,
+                last_accessed_at=now,
+                access_count=0,
+                size_bytes=size_bytes,
+            )
+            self._entries[cache_id] = entry
+            logger.debug(
+                "Cached result for %s (%d bytes) → cache_id=%s",
+                tool_name,
+                size_bytes,
+                cache_id,
+            )
+            return cache_id
 
-    def get(self, cache_id: str) -> Optional[List[Content]]:
+    async def get(self, cache_id: str) -> Optional[List[Content]]:
         """
         Retrieve cached content by cache_id.
 
         Returns ``None`` if the entry has expired or does not exist.
         """
-        entry = self._entries.get(cache_id)
-        if entry is None:
-            return None
+        async with self._lock:
+            entry = self._entries.get(cache_id)
+            if entry is None:
+                return None
 
-        if entry.age_seconds > self.ttl_seconds:
-            del self._entries[cache_id]
-            logger.debug("Cache entry %s expired (age=%.1fs)", cache_id, entry.age_seconds)
-            return None
+            if entry.age_seconds > self.ttl_seconds:
+                del self._entries[cache_id]
+                logger.debug("Cache entry %s expired (age=%.1fs)", cache_id, entry.age_seconds)
+                return None
 
-        entry.access_count += 1
-        entry.last_accessed_at = time.monotonic()
-        logger.debug(
-            "Cache hit for %s (access #%d)", cache_id, entry.access_count
-        )
-        return entry.content
+            entry.access_count += 1
+            entry.last_accessed_at = time.monotonic()
+            logger.debug(
+                "Cache hit for %s (access #%d)", cache_id, entry.access_count
+            )
+            return entry.content
 
-    def get_entry(self, cache_id: str) -> Optional[CacheEntry]:
+    async def get_entry(self, cache_id: str) -> Optional[CacheEntry]:
         """
         Retrieve the full CacheEntry (including metadata) by cache_id.
 
         Returns ``None`` if expired or missing.
         """
-        entry = self._entries.get(cache_id)
-        if entry is None:
-            return None
+        async with self._lock:
+            entry = self._entries.get(cache_id)
+            if entry is None:
+                return None
 
-        if entry.age_seconds > self.ttl_seconds:
-            del self._entries[cache_id]
-            return None
+            if entry.age_seconds > self.ttl_seconds:
+                del self._entries[cache_id]
+                return None
 
-        entry.access_count += 1
-        entry.last_accessed_at = time.monotonic()
-        return entry
+            entry.access_count += 1
+            entry.last_accessed_at = time.monotonic()
+            return entry
 
-    def remove(self, cache_id: str) -> bool:
+    async def remove(self, cache_id: str) -> bool:
         """Remove a specific entry. Returns True if it existed."""
-        return self._entries.pop(cache_id, None) is not None
+        async with self._lock:
+            return self._entries.pop(cache_id, None) is not None
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """Remove all cache entries."""
-        self._entries.clear()
-        logger.debug("Cache cleared")
+        async with self._lock:
+            self._entries.clear()
+            logger.debug("Cache cleared")
 
     @property
     def size(self) -> int:
