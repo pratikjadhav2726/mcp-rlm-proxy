@@ -8,7 +8,7 @@
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/yourusername/mcp-rlm-proxy.git && cd mcp-rlm-proxy && uv sync
+git clone https://github.com/pratikjadhav2726/mcp-rlm-proxy.git && cd mcp-rlm-proxy && uv sync
 
 # 2. Configure your existing servers
 cat > mcp.json << EOF
@@ -251,7 +251,7 @@ Returns: types, field names, sizes, and a small sample.
 
 ```bash
 # Using uv (recommended)
-git clone https://github.com/yourusername/mcp-rlm-proxy.git
+git clone https://github.com/pratikjadhav2726/mcp-rlm-proxy.git
 cd mcp-rlm-proxy
 uv sync
 
