@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - Architecture Refactor: First-Class Proxy Tools (2026-02-10)
+
+#### Breaking Change: `_meta` Parameter Removed from Tool Schemas
+- **BREAKING**: Tool schemas are no longer modified with the `_meta` parameter injection
+- **Removed** `_enhance_tool_schema()` — underlying tool schemas now pass through **unmodified**
+- **Rationale**: LLM agents were unable to reliably discover or use the deeply nested `_meta` parameter due to non-standard placement, schema bloat, and the `additionalProperties: true` hack
+
+#### Added: First-Class Proxy Tools
+Three new standard MCP tools replace the `_meta` approach — agents discover them naturally via `list_tools()`:
+- **`proxy_filter`** — Field projection (include/exclude) on cached or fresh tool results
+- **`proxy_search`** — Pattern search (regex, BM25, fuzzy, context) on cached or fresh results
+- **`proxy_explore`** — Structure discovery (types, field names, sizes, samples) without loading full content
+- All parameters are **flat, top-level, simple types** — no nested objects required
+
+#### Added: SmartCacheManager (`cache.py`)
+- New caching layer for tool outputs — avoids re-executing underlying tools for filtered follow-ups
+- TTL-based expiration (configurable, default 300s)
+- LRU eviction when capacity limit is reached
+- UUID-based cache keys for uniqueness
+- Hit/miss statistics for monitoring
+
+#### Added: Automatic Large-Response Truncation
+- Responses exceeding `max_response_tokens` are automatically truncated
+- Full original response is cached with a `cache_id` appended to the truncated output
+- Agents can use `proxy_filter`, `proxy_search`, or `proxy_explore` with the `cache_id` to drill into the data
+
+#### Added: BaseProcessor & ProcessorPipeline
+- **`BaseProcessor`** (ABC) — standardized `process(content, params) -> ProcessorResult` interface
+- **`ProcessorResult`** dataclass — content, metadata, original/processed sizes, applied flag, error field
+- **`ProcessorPipeline`** — composes a sequence of processors, runs them in order, accumulates metadata and size tracking
+- All existing processors refactored to inherit from `BaseProcessor`
+
+#### Refactored: Processor Hierarchy
+- `ProjectionProcessor` now inherits `BaseProcessor` and returns `ProcessorResult`
+- `GrepProcessor` refactored from static methods to instance methods; uses strategy pattern to delegate to BM25, fuzzy, context, and structure search modes
+- `BM25Processor`, `FuzzyMatcher`, `ContextExtractor`, `StructureNavigator` (in `advanced_search.py`) all inherit `BaseProcessor`
+
+#### Added: ProxySettings Configuration
+- New `proxySettings` section in `mcp.json` with Pydantic validation:
+  - `maxResponseSize` — character threshold for auto-truncation (default 8000)
+  - `cacheMaxEntries` — maximum cached responses (default 50)
+  - `cacheTTLSeconds` — cache entry TTL (default 300s)
+  - `enableAutoTruncation` — toggle auto-truncation (default true)
+
+#### Updated: Tests
+- 64 tests passing across all modules
+- New test suites: `test_cache.py`, `test_config.py`
+- Updated `test_processors.py` for `ProcessorResult` interface and `ProcessorPipeline`
+- Updated `test_schema_enhancement.py` to verify schemas are **not** modified
+- Updated `test_proxy.py` to verify proxy tools are registered
+
+#### Updated: Documentation
+- `README.md` rewritten with proxy tool reference, agent workflow examples, token savings tables
+- `ARCHITECTURE.md` rewritten with data flow diagrams, cache architecture, pipeline visualization
+
+#### Legacy `_meta` Compatibility
+- The `_meta` parameter is still **accepted** in tool arguments for backward compatibility
+- It is no longer **advertised** in tool schemas
+- Recommended migration: use `proxy_filter` / `proxy_search` / `proxy_explore` instead
+
+---
+
 ### Changed - Configuration Format (2026-02-05)
 
 #### Breaking Change: mcp.json Format

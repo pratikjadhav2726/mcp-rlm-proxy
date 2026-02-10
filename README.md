@@ -1,8 +1,8 @@
 # MCP-RLM-Proxy: Intelligent Middleware for MCP Servers
 
-> **Production-ready middleware** implementing Recursive Language Model principles ([arXiv:2512.24601](https://arxiv.org/abs/2512.24601)) for efficient multi-server management, field projection, and grep-based filtering. **100% compatible with the MCP specification** - works with any existing MCP server without modification.
+> **Production-ready middleware** implementing Recursive Language Model principles ([arXiv:2512.24601](https://arxiv.org/abs/2512.24601)) for efficient multi-server management, automatic large-response handling, and first-class proxy tools for recursive data exploration. **100% compatible with the MCP specification** - works with any existing MCP server without modification.
 
-## 🚀 Quick Start for Current MCP Users
+## Quick Start for Current MCP Users
 
 **Already using MCP servers?** Add this as middleware in 5 minutes:
 
@@ -26,18 +26,17 @@ EOF
 uv run -m mcp_proxy
 ```
 
-**That's it!** Your servers now support field projection and grep filtering. See [Migration Guide](docs/MIGRATION_GUIDE.md) for detailed instructions.
+**That's it!** Your servers now have automatic large-response handling and three powerful proxy tools for recursive exploration.
 
 ---
 
-## 🎯 Why Use This as Middleware?
+## Why Use This as Middleware?
 
-### The Problem with Direct MCP Connections
 ### The Problem with Direct MCP Connections
 
 When AI agents connect directly to MCP servers:
 - **Token waste**: 85-95% of returned data is often unnecessary
-- **Context pollution**: Irrelevant data dilutes important information  
+- **Context pollution**: Irrelevant data dilutes important information
 - **No multi-server aggregation**: Must connect to each server separately
 - **Performance degradation**: Large responses slow everything down
 - **Cost explosion**: Every unnecessary token costs money
@@ -45,242 +44,176 @@ When AI agents connect directly to MCP servers:
 ### The Solution: Intelligent Middleware
 
 ```
-┌─────────────┐
-│  MCP Client │  (Claude Desktop, Custom Client)
-└──────┬──────┘
-       │ ONE connection
-       ▼
-┌─────────────┐
-│ MCP-RLM     │  ◄── THIS MIDDLEWARE
-│ Proxy       │  • Connects to N servers
-│             │  • Filters responses (projection/grep)
-│             │  • Tracks token savings
-│             │  • Parallel tool discovery
-└──────┬──────┘
-       │ Manages connections to your servers
-   ┌───┴────┬────────┬────────┐
-   ▼        ▼        ▼        ▼
-┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐
-│ FS  │  │ Git │  │ API │  │ DB  │  ◄── Your existing servers
-└─────┘  └─────┘  └─────┘  └─────┘      (NO changes needed!)
++---------------+
+|  MCP Client   |  (Claude Desktop, Cursor, Custom Client)
++-------+-------+
+        | ONE connection
+        v
++---------------+
+| MCP-RLM       |  <-- THIS MIDDLEWARE
+| Proxy         |  - Connects to N servers
+|               |  - Auto-truncates large responses
+|               |  - Caches + provides proxy_filter / proxy_search / proxy_explore
+|               |  - Tracks token savings
++-------+-------+
+        | Manages connections to your servers
+    +---+----+--------+--------+
+    v        v        v        v
++-----+  +-----+  +-----+  +-----+
+| FS  |  | Git |  | API |  | DB  |  <-- Your existing servers
++-----+  +-----+  +-----+  +-----+      (NO changes needed!)
 ```
 
 ### Benefits
 
-✅ **Zero Friction**: Works with existing MCP servers (no code changes)  
-✅ **Huge Token Savings**: 85-95% reduction typical  
-✅ **Multi-Server**: Aggregate tools from many servers through one interface  
-✅ **RLM Principles**: Recursive context management for large outputs  
-✅ **Full Compatibility**: 100% MCP spec compliant  
-✅ **Production Ready**: Connection pooling, error handling, metrics  
+- **Zero Friction**: Works with existing MCP servers (no code changes)
+- **Huge Token Savings**: 85-95% reduction typical
+- **Multi-Server**: Aggregate tools from many servers through one interface
+- **Clean Schemas**: No `_meta` injection; tool schemas are passed through unmodified
+- **Agent-Friendly**: Three first-class proxy tools with flat, simple parameters
+- **Auto-Truncation**: Large responses automatically truncated + cached for follow-up
+- **Production Ready**: Connection pooling, error handling, metrics, TTL-based caching
 
 ---
 
-## 🔗 Middleware Architecture & Adoption
+## How It Works
 
-### How It Works as Middleware
-
-The proxy sits between your MCP client and your MCP servers, providing transparent enhancement:
+### Architecture Overview
 
 1. **Client connects to proxy** (instead of individual servers)
-2. **Proxy connects to N servers** (configured in `config.yaml`)
+2. **Proxy connects to N servers** (configured in `mcp.json`)
 3. **Tools are aggregated** with server prefixes (`filesystem_read_file`)
-4. **Tool calls are enhanced** with optional `_meta` parameter
-5. **Responses are filtered** based on projection/grep specifications
-6. **Token savings are tracked** automatically
+4. **Tool schemas pass through clean** - no modification, no `_meta` injection
+5. **Large responses are auto-truncated** and cached with a `cache_id`
+6. **Three proxy tools** let agents drill into cached data without re-executing
 
-### Adoption for Current MCP Users
+### The Proxy Tools
 
-**Already have MCP servers?** Perfect! Here's the migration:
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `proxy_filter` | Project/filter specific fields from cached or fresh result | `cache_id`, `fields`, `exclude`, `mode` |
+| `proxy_search` | Grep/BM25/fuzzy/context search on cached or fresh result | `cache_id`, `pattern`, `mode`, `max_results` |
+| `proxy_explore` | Discover data structure without loading content | `cache_id`, `max_depth` |
 
-**Before** (Direct connection):
-```json
-// Your MCP client config
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-    }
-  }
-}
+All parameters are **flat, top-level, simple types** - no nested objects required. Each tool can work in two modes:
+
+- **Cached mode**: pass `cache_id` from a previous truncated response
+- **Fresh mode**: pass `tool` + `arguments` to call and filter in one step
+
+### Typical Agent Workflow
+
 ```
+Step 1: Agent calls filesystem_read_file(path="large-data.json")
+        -> Response is 50,000 chars -> auto-truncated + cached
+        -> Agent receives first 8,000 chars + cache_id="a1b2c3d4e5f6"
 
-**Before** (Through proxy):
-```json
-// mcp.json (proxy configuration)
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-    }
-  }
-}
+Step 2: Agent calls proxy_explore(cache_id="a1b2c3d4e5f6")
+        -> Returns structure summary: types, field names, sizes, sample
+        -> 200 tokens instead of 50,000
+
+Step 3: Agent calls proxy_filter(cache_id="a1b2c3d4e5f6", fields=["users.name", "users.email"])
+        -> Returns only projected fields
+        -> 500 tokens instead of 50,000
+
+Step 4: Agent calls proxy_search(cache_id="a1b2c3d4e5f6", pattern="error", mode="bm25", top_k=3)
+        -> Returns top-3 most relevant chunks
+        -> 800 tokens instead of 50,000
+
+Total: ~1,500 tokens vs 50,000+ (97% savings!)
 ```
-
-```json
-// Your MCP client config
-{
-  "mcpServers": {
-    "proxy": {
-      "command": "uv",
-      "args": ["run", "-m", "mcp_proxy"],
-      "cwd": "/path/to/mcp-rlm-proxy"
-    }
-  }
-}
-```
-
-**Your MCP servers require ZERO changes.** See [Middleware Adoption Guide](docs/MIDDLEWARE_ADOPTION.md) and [Migration Guide](docs/MIGRATION_GUIDE.md).
 
 ---
 
-## 📊 Token Savings Impact
+## Token Savings Impact
 
 ### Real-World Token Reduction Examples
 
-| Use Case | Without Proxy | With Projection | Savings | Cost Impact* |
-|----------|---------------|-----------------|---------|--------------|
-| **User Profile API** (Full object with metadata, timestamps, preferences, etc.) | 2,500 tokens | 150 tokens | **94%** | $0.10 → $0.006 per call |
-| **Log File Search** (1MB log file) | 280,000 tokens | 800 tokens | **99.7%** | Rate limited → $0.32 |
-| **Database Query Result** (100 rows, 20 columns) | 15,000 tokens | 1,200 tokens | **92%** | $0.60 → $0.048 per query |
-| **File System Scan** (Directory tree with metadata) | 8,000 tokens | 400 tokens | **95%** | $0.32 → $0.016 per scan |
+| Use Case | Without Proxy | With Proxy | Savings | Cost Impact* |
+|----------|---------------|------------|---------|--------------|
+| **User Profile API** | 2,500 tokens | 150 tokens | **94%** | $0.10 -> $0.006 |
+| **Log File Search** (1MB) | 280,000 tokens | 800 tokens | **99.7%** | Rate limited -> $0.32 |
+| **Database Query** (100 rows) | 15,000 tokens | 1,200 tokens | **92%** | $0.60 -> $0.048 |
+| **File System Scan** | 8,000 tokens | 400 tokens | **95%** | $0.32 -> $0.016 |
 
-\* Estimated using GPT-4 pricing ($0.03/1K input tokens, $0.06/1K output tokens)
+\* Estimated using GPT-4 pricing ($0.03/1K input tokens)
 
 ### Compound Savings in Multi-Step Workflows
 
 For a typical AI agent workflow with 10 tool calls:
-- **Without proxy**: 10 calls × 10,000 tokens avg = **100,000 tokens** → $3.00
-- **With RLM-proxy**: 10 calls × 800 tokens avg = **8,000 tokens** → $0.24
+- **Without proxy**: 10 calls x 10,000 tokens avg = **100,000 tokens** -> $3.00
+- **With proxy**: 10 calls x 800 tokens avg = **8,000 tokens** -> $0.24
 - **Total savings per workflow**: **$2.76 (92% reduction)**
 
-For production systems handling 1,000 workflows/day:
-- **Annual savings**: ~$1M USD
-- **Performance**: 3-5x faster agent response times
-- **Quality**: Reduced context confusion and hallucinations
-
 ---
 
-## 🧠 How Regex on Tool Output Works
+## Proxy Tool Reference
 
-### Field Projection: Surgical Data Extraction
+### proxy_filter
 
-**Scenario**: Get user information without loading 50+ profile fields
+Filter/project specific fields from a cached or fresh tool result.
 
 ```json
 {
-  "name": "get_user_profile",
-  "arguments": {
-    "userId": "user123",
-    "_meta": {
-      "projection": {
-        "mode": "include",
-        "fields": ["name", "email", "role"]
-      }
-    }
-  }
+  "cache_id": "a1b2c3d4e5f6",
+  "fields": ["name", "users.email"],
+  "mode": "include"
 }
 ```
 
-**What happens internally**:
-1. Proxy forwards request to underlying MCP server
-2. Server returns full 2,500-token user object
-3. Proxy applies projection filter
-4. Agent receives only: `{"name": "John", "email": "john@example.com", "role": "admin"}` (60 tokens)
-
-**Token savings**: 2,500 → 60 tokens (97.6% reduction)
-
----
-
-### Grep Search: Pattern-Based Filtering
-
-**Scenario**: Find errors in a 1MB log file
+Or with fresh call:
 
 ```json
 {
-  "name": "read_file",
-  "arguments": {
-    "path": "/logs/app.log",
-    "_meta": {
-      "grep": {
-        "pattern": "ERROR|FATAL",
-        "caseInsensitive": true,
-        "maxMatches": 50,
-        "contextLines": {"both": 2}
-      }
-    }
-  }
+  "tool": "filesystem_read_file",
+  "arguments": {"path": "data.json"},
+  "fields": ["users.name", "users.email"]
 }
 ```
 
-**What happens internally**:
-1. Proxy reads entire log file (280,000 tokens)
-2. Regex engine scans for pattern matches
-3. Extracts matching lines + 2 lines context before/after
-4. Agent receives only relevant error sections (~800 tokens)
+### proxy_search
 
-**Token savings**: 280,000 → 800 tokens (99.7% reduction)
+Search within a cached or fresh result. Modes: `regex`, `bm25`, `fuzzy`, `context`.
 
-**Advanced Grep Features**:
-- **Multiline patterns**: Match function definitions across lines
-- **Context windows**: Include surrounding lines for debugging
-- **Case-insensitive**: Flexible pattern matching
-- **Max matches**: Prevent token explosion from too many hits
-
----
-
-## 🤖 Benefits for AI Agents & Agentic Workflows
-
-### 1. **Recursive Context Decomposition** (RLM Core Principle)
-Agents can iteratively refine their queries:
-
-```python
-# Step 1: Explore what fields exist
-agent.call("get_user", projection={"fields": ["_keys"]})  
-# Returns: ["name", "email", "preferences", "history", "metadata", ...]
-
-# Step 2: Get only relevant fields
-agent.call("get_user", projection={"fields": ["email", "preferences.notifications"]})
-# Returns: minimal data needed for task
+```json
+{
+  "cache_id": "a1b2c3d4e5f6",
+  "pattern": "ERROR|FATAL",
+  "mode": "regex",
+  "case_insensitive": true,
+  "max_results": 20,
+  "context_lines": 2
+}
 ```
 
-### 2. **Better Context Management**
-- **Clean context windows**: Only relevant data in memory
-- **Reduced hallucinations**: Less noise = better reasoning
-- **Longer conversation threads**: More space for task history
+BM25 relevance search:
 
-### 3. **Cost-Effective Scaling**
-- **Production-ready**: Handle millions of tool calls economically
-- **Budget predictability**: Cap token usage per operation
-- **ROI measurable**: Track token savings in real-time
+```json
+{
+  "cache_id": "a1b2c3d4e5f6",
+  "pattern": "database connection timeout",
+  "mode": "bm25",
+  "top_k": 5
+}
+```
 
-### 4. **Privacy & Security**
-- **Data minimization**: Only expose necessary fields
-- **Compliance**: GDPR/CCPA friendly (principle of data minimization)
-- **Audit trail**: Log what data was accessed
+### proxy_explore
 
----
+Discover the structure of data without loading it all.
 
-## 🎓 Comparison with RLM Paper Concepts
+```json
+{
+  "cache_id": "a1b2c3d4e5f6",
+  "max_depth": 3
+}
+```
 
-| RLM Paper Concept | MCP-RLM-Proxy Implementation |
-|-------------------|------------------------------|
-| **External Environment** | Tool outputs treated as inspectable data stores |
-| **Recursive Decomposition** | Field projection allows hierarchical field access |
-| **Programmatic Exploration** | Regex grep enables code-driven search |
-| **Snippet Processing** | Returns only matched content + context |
-| **Cost Efficiency** | 85-95% token reduction vs. full context loading |
-| **Long Context Handling** | Processes multi-MB tool outputs without context limits |
+Returns: types, field names, sizes, and a small sample.
 
 ---
 
-## 🔧 Features
+## Configuration
 
-### 1. Multi-Server Connection Management
-
-**Efficient parallel server connections** with automatic connection pooling:
+### mcp.json
 
 ```json
 {
@@ -292,212 +225,49 @@ agent.call("get_user", projection={"fields": ["email", "preferences.notification
     "git": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-git", "/repo"]
-    },
-    "api": {
-      "command": "python",
-      "args": ["-m", "my_api_server"],
-      "env": {
-        "API_KEY": "${API_KEY}"
-      }
     }
+  },
+  "proxySettings": {
+    "maxResponseSize": 8000,
+    "cacheMaxEntries": 50,
+    "cacheTTLSeconds": 300,
+    "enableAutoTruncation": true
   }
 }
 ```
 
-**Benefits**:
-- Tools from all servers available through one connection
-- Parallel tool discovery (5 servers connect in ~3s, not 15s)
-- Persistent connections (no reconnection overhead)
-- Automatic reconnection on failure
+### Proxy Settings
 
-### 2. Field Projection
-
-**Include Mode** (whitelist):
-```json
-{
-  "projection": {
-    "mode": "include",
-    "fields": ["name", "address.city", "orders[].id"]
-  }
-}
-```
-
-**Exclude Mode** (blacklist):
-```json
-{
-  "projection": {
-    "mode": "exclude",
-    "fields": ["password", "ssn", "internal_metadata"]
-  }
-}
-```
-
-**Nested Field Access**:
-- `address.city` → Access nested objects
-- `orders[].id` → Access array elements
-- `settings.*.enabled` → Wildcard matching
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `maxResponseSize` | 8000 | Character threshold for auto-truncation |
+| `cacheMaxEntries` | 50 | Maximum cached responses |
+| `cacheTTLSeconds` | 300 | Cache entry time-to-live (seconds) |
+| `enableAutoTruncation` | true | Enable/disable auto-truncation + caching |
 
 ---
 
-### 3. Grep Search (Advanced)
-
-**Basic Pattern Matching**:
-```json
-{
-  "grep": {
-    "pattern": "TODO|FIXME",
-    "caseInsensitive": true
-  }
-}
-```
-
-**Context Lines** (like Unix grep -A/-B/-C):
-```json
-{
-  "grep": {
-    "pattern": "function.*critical",
-    "contextLines": {
-      "before": 5,    // grep -B 5
-      "after": 3,     // grep -A 3
-      "both": 4       // grep -C 4 (overrides before/after)
-    }
-  }
-}
-```
-
-**Multiline Patterns**:
-```json
-{
-  "grep": {
-    "pattern": "def .*\\n\\s+return",
-    "multiline": true
-  }
-}
-```
-
-**Performance**: 10-100ms overhead on large files, but saves 99%+ tokens
-
----
-
-### 4. Performance Monitoring & Telemetry
-
-Automatic tracking of token savings and performance:
-
-```
-INFO: Token savings: 50,000 → 500 tokens (99.0% reduction)
-
-=== Proxy Performance Summary ===
-  Total calls: 127
-  Projection calls: 45
-  Grep calls: 23
-  Original tokens: 2,450,000
-  Filtered tokens: 125,000
-  Tokens saved: 2,325,000
-  Savings: 94.9%
-  Active connections: 3
-```
-
-**What's tracked**:
-- Token savings per call
-- Cumulative savings across session
-- Projection vs grep usage
-- Connection health
-- Failed connection attempts
-
----
-
-### 5. Recursive Language Model (RLM) Integration
-
-Implements principles from [arXiv:2512.24601](https://arxiv.org/abs/2512.24601) for recursive context management:
-
-**Recursive Exploration Pattern**:
-```python
-# Step 1: Discover structure (minimal tokens)
-fields = await call_tool("api_get_data", {
-    "_meta": {"projection": {"mode": "include", "fields": ["_keys"]}}
-})
-# Returns: ["id", "name", "profile", "history", "metadata", ...]
-
-# Step 2: Get overview (filtered)
-overview = await call_tool("api_get_data", {
-    "_meta": {"projection": {"mode": "include", "fields": ["id", "name", "status"]}}
-})
-# Returns: 200 tokens instead of 20,000
-
-# Step 3: Drill down on specifics
-details = await call_tool("api_get_data", {
-    "_meta": {"projection": {"mode": "include", "fields": ["profile.bio", "history.recent"]}}
-})
-# Returns: 400 tokens instead of 15,000
-```
-
-**Total: ~1,000 tokens vs 50,000+ tokens (98% savings)**
-
-See `src/mcp_proxy/rlm_processor.py` for advanced RLM features:
-- `RecursiveContextManager` - Analyzes when to decompose large outputs
-- `ChunkProcessor` - Splits large outputs into manageable chunks
-- `FieldDiscoveryHelper` - Discovers available fields for exploration
-
----
-
-## 📈 Performance Metrics
-
-### Latency Impact
-- **Field projection overhead**: 2-5ms per request
-- **Regex grep (small files <1MB)**: 10-50ms
-- **Regex grep (large files >10MB)**: 100-500ms
-- **Network savings**: Reduced payload sizes improve transfer times
-
-### Memory Efficiency
-- **Streaming support**: Process large files without loading entirely into memory
-- **Incremental parsing**: Stop processing after `maxMatches` reached
-
----
-
-## 🚀 Quick Start
-
-### Installation
+## Installation
 
 ```bash
-# Option 1: Using uv (recommended)
+# Using uv (recommended)
 git clone https://github.com/yourusername/mcp-rlm-proxy.git
 cd mcp-rlm-proxy
 uv sync
 
-# Option 2: Using pip
+# Using pip
 pip install -e .
 ```
-
-### Configuration
-
-Create `mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/yourpath"]
-    }
-  }
-}
-```
-
-Add more servers as needed by adding entries to the `mcpServers` object.
 
 ### Running the Proxy
 
 ```bash
-# Start the proxy
 uv run -m mcp_proxy
-
-# Or if installed as package
-mcp-proxy
 ```
 
 ### Using with Claude Desktop
 
-Edit your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Edit your Claude Desktop config:
 
 ```json
 {
@@ -526,180 +296,105 @@ server_params = StdioServerParameters(
 async with stdio_client(server_params) as (read, write):
     async with ClientSession(read, write) as session:
         await session.initialize()
-        
-        # List tools (now prefixed with server names)
+
+        # List tools (prefixed with server names + 3 proxy tools)
         tools = await session.list_tools()
-        
-        # Call a tool with projection
+
+        # Call a tool - if response is large, it's auto-truncated with cache_id
         result = await session.call_tool("filesystem_read_file", {
-            "path": "data.json",
-            "_meta": {
-                "projection": {
-                    "mode": "include",
-                    "fields": ["users.name", "users.email"]
-                }
-            }
+            "path": "large-data.json"
+        })
+
+        # Drill into the cached data
+        filtered = await session.call_tool("proxy_filter", {
+            "cache_id": "a1b2c3d4e5f6",
+            "fields": ["users.name", "users.email"]
         })
 ```
 
-For detailed migration from direct MCP connections, see [Migration Guide](docs/MIGRATION_GUIDE.md).
+---
+
+## Legacy _meta Support
+
+For backward compatibility, the `_meta` parameter is still accepted in tool arguments but is no longer advertised in schemas. If you pass `_meta.projection` or `_meta.grep`, the proxy will apply them. However, the recommended approach is to use the proxy tools instead:
+
+| Old way (_meta) | New way (proxy tools) |
+|-----------------|----------------------|
+| Hidden in nested `_meta.projection` | `proxy_filter(fields=["name"])` |
+| Hidden in nested `_meta.grep` | `proxy_search(pattern="ERROR")` |
+| Not discoverable by agents | First-class tools visible in `list_tools()` |
 
 ---
 
-## 📚 Documentation
+## Search Modes
 
-### Quick Links
-
-- **[📋 Summary & Comparison](docs/SUMMARY.md)** - Complete overview and feature comparison
-- **[🚀 Middleware Adoption Guide](docs/MIDDLEWARE_ADOPTION.md)** - Why and how to use this as middleware
-- **[📖 Migration Guide](docs/MIGRATION_GUIDE.md)** - Step-by-step migration (5-15 min)
-- **[⚡ Quick Reference](docs/QUICK_REFERENCE.md)** - Syntax and command reference
-
-### For Current MCP Server Users
-
-- **[🚀 Middleware Adoption Guide](docs/MIDDLEWARE_ADOPTION.md)** - Why and how to use this as middleware
-- **[📖 Migration Guide](docs/MIGRATION_GUIDE.md)** - Step-by-step migration from direct MCP connections (5-15 min)
-- **[⚡ Quick Reference](docs/QUICK_REFERENCE.md)** - Syntax and command reference
-
-### Technical Documentation
-
-- **[🏗️ Architecture](docs/ARCHITECTURE.md)** - System design and data flow
-- **[⚙️ Configuration](docs/CONFIGURATION.md)** - Configuration options and validation
-- **[📊 Performance](docs/PERFORMANCE.md)** - Performance benchmarks and optimization
-- **[📝 Logging](docs/LOGGING.md)** - Logging configuration and troubleshooting
-
-### Getting Started
-
-- **[🎓 Quick Start](QUICKSTART.md)** - Get running in 5 minutes
-- **[📚 Use Cases](#-use-cases)** - Common usage patterns
-- **[🤝 Contributing](CONTRIBUTING.md)** - Contribution guidelines
+| Mode | Use When | Token Savings |
+|------|----------|---------------|
+| `structure` (proxy_explore) | Don't know data format | 99.9%+ |
+| `bm25` | Know what, not where | 99%+ |
+| `fuzzy` | Handle typos/variations | 98%+ |
+| `context` | Need full paragraphs | 95%+ |
+| `regex` | Know exact pattern | 95%+ |
 
 ---
 
-## 📚 Use Cases
+## Performance Monitoring
 
-### 1. **Code Analysis Agents**
-```python
-# Find all TODO comments in project
-grep(pattern="TODO:", contextLines=2)
-# Returns: 200 tokens instead of 500,000 token codebase
+Automatic tracking of token savings and performance:
+
 ```
+INFO: Token savings: 50,000 -> 500 tokens (99.0% reduction)
 
-### 2. **Database Query Agents**
-```python
-# Get only IDs and timestamps from query
-projection(fields=["id", "created_at"])
-# Returns: 1,000 tokens instead of 20,000 token full rows
-```
-
-### 3. **Log Analysis Agents**
-```python
-# Find authentication failures
-grep(pattern="AUTH_FAILED", maxMatches=100)
-# Returns: 2,000 tokens instead of 2,000,000 token log file
-```
-
-### 4. **API Integration Agents**
-```python
-# Extract nested field from API response
-projection(fields=["data.users[].email"])
-# Returns: 300 tokens instead of 15,000 token response
+=== Proxy Performance Summary ===
+  Total calls: 127
+  Projection calls: 45
+  Grep calls: 23
+  Auto-truncated: 15
+  Original tokens: 2,450,000
+  Filtered tokens: 125,000
+  Tokens saved: 2,325,000
+  Savings: 94.9%
+  Active connections: 3
 ```
 
 ---
 
-## 🔬 Advanced Topics
+## Comparison with RLM Paper Concepts
 
-### Combining Projection + Grep
-
-```json
-{
-  "name": "search_logs",
-  "arguments": {
-    "query": "*",
-    "_meta": {
-      "grep": {
-        "pattern": "ERROR",
-        "maxMatches": 10
-      },
-      "projection": {
-        "mode": "include",
-        "fields": ["timestamp", "level", "message"]
-      }
-    }
-  }
-}
-```
-
-**Result**: Filter by pattern, then extract only specific fields from matches.
+| RLM Paper Concept | MCP-RLM-Proxy Implementation |
+|-------------------|------------------------------|
+| **External Environment** | Tool outputs treated as inspectable data stores |
+| **Recursive Decomposition** | proxy_explore -> proxy_filter -> proxy_search workflow |
+| **Programmatic Exploration** | proxy_search with multiple modes |
+| **Snippet Processing** | Auto-truncation + cached follow-up |
+| **Cost Efficiency** | 85-95% token reduction vs. full context loading |
+| **Long Context Handling** | Processes multi-MB tool outputs without context limits |
 
 ---
 
-## 🛠️ Implementation Details
+## Documentation
 
-### How Field Projection Works
-
-1. **Parse JSON Path**: Convert `"address.city"` → JSONPath query
-2. **Apply Filter**: Traverse response object and extract matching paths
-3. **Reconstruct**: Build minimal JSON with only requested fields
-4. **Return**: Send filtered response to agent
-
-### How Regex Grep Works
-
-1. **Stream Processing**: Read file/response line-by-line
-2. **Pattern Match**: Apply regex to each line
-3. **Context Collection**: Include N lines before/after match
-4. **Deduplication**: Merge overlapping context windows
-5. **Return**: Send only matched sections
+- **[Architecture](docs/ARCHITECTURE.md)** - System design and data flow
+- **[Configuration](docs/CONFIGURATION.md)** - Configuration options and validation
+- **[Performance](docs/PERFORMANCE.md)** - Performance benchmarks and optimization
 
 ---
 
-## 📖 Related Concepts
+## Related Concepts
 
 - **Recursive Language Models Paper**: [arXiv:2512.24601](https://arxiv.org/abs/2512.24601)
 - **Model Context Protocol**: [MCP Specification](https://github.com/modelcontextprotocol)
-- **Original Discussion**: [GitHub #1709](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/1709)
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
----
-
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE)
 
 ---
 
-## 🙏 Acknowledgments
-
-- **RLM Paper Authors**: For the recursive context management framework
-- **MCP Community**: For the Model Context Protocol specification
-- **Early Adopters**: For feedback and real-world use cases
-
----
-
-## 📊 Token Savings Calculator
-
-Want to estimate your savings? Use our interactive calculator:
-
-```python
-# Example: Database query returning 100 rows × 20 fields
-full_response_tokens = 100 * 20 * 8  # ~16,000 tokens
-needed_fields = 3
-projected_tokens = 100 * 3 * 8  # ~2,400 tokens
-
-savings = (full_response_tokens - projected_tokens) / full_response_tokens
-print(f"Token savings: {savings:.1%}")  # 85.0%
-
-# At $0.03/1K tokens
-cost_savings = (full_response_tokens - projected_tokens) * 0.03 / 1000
-print(f"Cost savings per query: ${cost_savings:.3f}")  # $0.408
-```
-
----
-
-**Built with ❤️ for the AI agent community**
+**Built for the AI agent community**
