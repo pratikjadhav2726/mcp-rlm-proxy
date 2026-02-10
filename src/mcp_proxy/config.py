@@ -35,13 +35,25 @@ class ProxySettings:
     """Character threshold above which a response is auto-truncated and cached."""
 
     cache_max_entries: int = 50
-    """Maximum number of entries in the response cache."""
+    """Maximum number of entries in the response cache (per agent if isolation enabled)."""
 
     cache_ttl_seconds: int = 300
     """Time-to-live in seconds for cache entries."""
 
     enable_auto_truncation: bool = True
     """Whether to automatically truncate + cache large responses."""
+
+    enable_agent_isolation: bool = True
+    """Whether to isolate cache per agent (recommended for multi-agent scenarios)."""
+
+    max_entries_per_agent: int = 20
+    """Maximum cache entries per agent (when isolation enabled)."""
+
+    max_memory_per_agent: int = 100 * 1024 * 1024
+    """Maximum memory (bytes) per agent cache (100MB default)."""
+
+    max_total_agents: int = 1000
+    """Maximum number of concurrent agent caches."""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ProxySettings":
@@ -50,6 +62,10 @@ class ProxySettings:
             cache_max_entries=data.get("cacheMaxEntries", cls.cache_max_entries),
             cache_ttl_seconds=data.get("cacheTTLSeconds", cls.cache_ttl_seconds),
             enable_auto_truncation=data.get("enableAutoTruncation", cls.enable_auto_truncation),
+            enable_agent_isolation=data.get("enableAgentIsolation", cls.enable_agent_isolation),
+            max_entries_per_agent=data.get("maxEntriesPerAgent", cls.max_entries_per_agent),
+            max_memory_per_agent=data.get("maxMemoryPerAgent", cls.max_memory_per_agent),
+            max_total_agents=data.get("maxTotalAgents", cls.max_total_agents),
         )
 
 

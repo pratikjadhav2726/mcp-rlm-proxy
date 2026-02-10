@@ -22,7 +22,7 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Content, TextContent, Tool, ServerCapabilities
 
-from mcp_proxy.cache import SmartCacheManager
+from mcp_proxy.cache import AgentAwareCacheManager, SmartCacheManager
 from mcp_proxy.config import ProxySettings
 from mcp_proxy.executor_manager import ExecutorManager
 from mcp_proxy.logging_config import get_logger
@@ -151,15 +151,30 @@ class MCPProxyServer:
         self.grep_processor = GrepProcessor(self.executor_manager)
         self.pipeline = ProcessorPipeline([self.projection_processor, self.grep_processor])
 
-        # Response cache
-        self.cache = SmartCacheManager(
-            max_entries=self.settings.cache_max_entries,
-            ttl_seconds=self.settings.cache_ttl_seconds,
-        )
+        # Response cache (agent-aware if enabled)
+        if self.settings.enable_agent_isolation:
+            self.cache = AgentAwareCacheManager(
+                max_entries_per_agent=self.settings.max_entries_per_agent,
+                max_memory_per_agent=self.settings.max_memory_per_agent,
+                ttl_seconds=self.settings.cache_ttl_seconds,
+                max_total_agents=self.settings.max_total_agents,
+                enable_agent_isolation=True,
+            )
+        else:
+            # Backward compatibility: use simple cache
+            self.cache = SmartCacheManager(
+                max_entries=self.settings.cache_max_entries,
+                ttl_seconds=self.settings.cache_ttl_seconds,
+            )
 
         # Connection bookkeeping
         self._server_contexts: Dict[str, Any] = {}
         self._connection_tasks: Dict[str, asyncio.Task] = {}
+        
+        # Agent/session tracking for cache isolation
+        self._session_to_agent: Dict[str, str] = {}
+        self._agent_counter = 0
+        self._agent_lock = asyncio.Lock()
 
         # Metrics
         self.metrics = ConnectionPoolMetrics()
@@ -318,7 +333,9 @@ class MCPProxyServer:
                 self.settings.enable_auto_truncation
                 and new_size > self.settings.max_response_size
             ):
-                cache_id = await self.cache.put(content, name, arguments)
+                # Use agent_id if available
+                agent_id = await self._get_agent_id()
+                cache_id = await self.cache.put(content, name, arguments, agent_id=agent_id)
                 truncated_text = self._truncate_content(content, self.settings.max_response_size)
                 hint = (
                     f"\n\n--- Response truncated ({new_size:,} chars). "
@@ -499,6 +516,7 @@ class MCPProxyServer:
         """Resolve content from cache_id or by calling a tool fresh."""
         cache_id = arguments.get("cache_id")
         tool = arguments.get("tool")
+        agent_id = await self._get_agent_id()
 
         if cache_id:
             cached = await self.cache.get(cache_id)
@@ -519,7 +537,7 @@ class MCPProxyServer:
                 )
                 content = list(result.content) if hasattr(result, "content") else []
                 # Cache the fresh result for potential follow-up
-                cid = await self.cache.put(content, tool, tool_args)
+                cid = await self.cache.put(content, tool, tool_args, agent_id=agent_id)
                 logger.debug("Fresh call cached as %s", cid)
                 return content
             except asyncio.TimeoutError:
@@ -648,6 +666,57 @@ class MCPProxyServer:
                 f"Call list_tools() to see all available tool names."
             )
         return server_name, tool_name
+
+    # ------------------------------------------------------------------
+    # Agent ID management
+    # ------------------------------------------------------------------
+
+    async def _get_agent_id(self) -> Optional[str]:
+        """
+        Get agent ID for current request context.
+        
+        Since MCP doesn't provide built-in agent identification, we use
+        a session-based approach. In a real deployment, this could be
+        enhanced to extract agent IDs from:
+        - MCP request headers/metadata
+        - Authentication tokens
+        - Session identifiers
+        - Custom context passed through the protocol
+        
+        Returns:
+            Agent ID string or None if isolation disabled.
+        """
+        if not self.settings.enable_agent_isolation:
+            return None
+        
+        # For now, use a simple session-based approach
+        # In production, extract from actual request context
+        try:
+            # Try to get current task/context identifier
+            # This is a simplified approach - in production you'd extract
+            # from actual MCP request metadata
+            current_task = asyncio.current_task()
+            if current_task:
+                task_name = current_task.get_name()
+                # Use task name as session identifier
+                session_id = task_name.split("-")[-1] if "-" in task_name else "default"
+            else:
+                session_id = "default"
+            
+            # Map session to agent ID
+            async with self._agent_lock:
+                if session_id not in self._session_to_agent:
+                    self._agent_counter += 1
+                    agent_id = f"agent_{self._agent_counter}"
+                    self._session_to_agent[session_id] = agent_id
+                    logger.debug("Assigned agent ID %s to session %s", agent_id, session_id)
+                else:
+                    agent_id = self._session_to_agent[session_id]
+            
+            return agent_id
+        except Exception:
+            # Fallback to default agent
+            return "default"
 
     # ------------------------------------------------------------------
     # Truncation helper
