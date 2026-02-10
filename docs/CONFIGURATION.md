@@ -2,39 +2,42 @@
 
 ## Overview
 
-The MCP Proxy Server uses Pydantic for robust configuration validation, ensuring that all server configurations are valid before attempting to connect to underlying servers.
+The MCP Proxy Server uses MCP client-style JSON configuration (`mcp.json`), which matches the standard configuration format used by Claude Desktop and other MCP clients. Configuration is validated using Pydantic for robustness.
 
 ## Configuration File
 
-The configuration is stored in a YAML file (default: `config.yaml`). The server looks for this file in:
+The configuration is stored in `mcp.json` (default location). The server looks for this file in:
 1. Current working directory
 2. Project root (one level up from `src/`)
 
 ## Configuration Structure
 
-```yaml
-underlying_servers:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
-    env:  # Optional
-      VAR1: value1
-      VAR2: value2
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "env": {
+        "VAR1": "value1",
+        "VAR2": "value2"
+      }
+    }
+  }
+}
 ```
 
 ## Server Configuration Fields
 
-### `name` (Required)
+### Server Name (Object Key)
 
-Unique identifier for the server.
+The key in the `mcpServers` object is the server name.
 
 - **Type**: String
 - **Constraints**:
   - Must be unique across all servers
-  - Alphanumeric characters, underscores (`_`), and hyphens (`-`) only
-  - 1-100 characters
-  - Leading/trailing whitespace is automatically trimmed
-- **Usage**: Used to prefix tool names (e.g., `filesystem_read_file`)
+  - Alphanumeric characters, underscores (`_`), and hyphens (`-`) recommended
+  - Used to prefix tool names (e.g., `filesystem_read_file`)
 
 **Valid Examples:**
 - `filesystem`
@@ -42,47 +45,39 @@ Unique identifier for the server.
 - `server-1`
 - `api_server_v2`
 
-**Invalid Examples:**
-- `server@name` (contains invalid character)
-- `server name` (contains space)
-- Empty string
-- Duplicate names across servers
-
 ### `command` (Required)
 
 Command to execute the server.
 
 - **Type**: String
-- **Constraints**:
-  - Cannot be empty
-  - Leading/trailing whitespace is automatically trimmed
 - **Examples**: `npx`, `python`, `node`, `uv`
 
 ### `args` (Optional)
 
 List of arguments to pass to the command.
 
-- **Type**: List of strings
-- **Default**: Empty list `[]`
+- **Type**: Array of strings
+- **Default**: Empty array `[]`
 - **Examples**:
-  ```yaml
-  args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-  args: ["-m", "my_mcp_server"]
-  args: []  # No arguments needed
+  ```json
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  "args": ["-m", "my_mcp_server"]
+  "args": []
   ```
 
 ### `env` (Optional)
 
 Environment variables for the server process.
 
-- **Type**: Dictionary of string key-value pairs
+- **Type**: Object (key-value pairs)
 - **Default**: `null` (no environment variables)
 - **Example**:
-  ```yaml
-  env:
-    API_KEY: "your-api-key"
-    DEBUG: "true"
-    PATH: "/custom/path"
+  ```json
+  "env": {
+    "API_KEY": "your-api-key",
+    "DEBUG": "true",
+    "PATH": "/custom/path"
+  }
   ```
 
 ## Validation Rules
@@ -90,20 +85,18 @@ Environment variables for the server process.
 ### Server Name Validation
 
 1. **Uniqueness**: Each server must have a unique name
-2. **Format**: Must match pattern `^[a-zA-Z0-9_-]+$`
-3. **Length**: Between 1 and 100 characters
-4. **Whitespace**: Automatically trimmed
+2. **Format**: Recommended pattern `^[a-zA-Z0-9_-]+$`
+3. **Clarity**: Use descriptive names
 
 ### Command Validation
 
 1. **Required**: Must be provided
-2. **Non-empty**: Cannot be empty or whitespace-only
-3. **Whitespace**: Automatically trimmed
+2. **Non-empty**: Cannot be empty string
 
 ### Global Validation
 
 1. **No Duplicate Names**: All server names must be unique
-2. **Valid YAML**: Configuration file must be valid YAML
+2. **Valid JSON**: Configuration file must be valid JSON
 3. **Type Safety**: All fields are type-checked
 
 ## Error Messages
@@ -113,81 +106,88 @@ When validation fails, you'll receive detailed error messages:
 ### Missing Required Field
 
 ```
-ValueError: Invalid configuration in config.yaml:
+ValueError: Invalid configuration in mcp.json:
 Configuration validation errors:
-  underlying_servers -> 0 -> name: Field required
+  filesystem -> command: Field required
 ```
 
 ### Duplicate Server Names
 
 ```
-ValueError: Invalid configuration in config.yaml:
+ValueError: Invalid configuration in mcp.json:
 Configuration validation errors:
-  underlying_servers: Value error, Duplicate server names found: server1. Each server must have a unique name.
+  Duplicate server names found: filesystem
 ```
 
-### Invalid Name Format
+### Invalid JSON
 
 ```
-ValueError: Invalid configuration in config.yaml:
-Configuration validation errors:
-  underlying_servers -> 0 -> name: String should match pattern '^[a-zA-Z0-9_-]+$'
-```
-
-### Invalid YAML
-
-```
-ValueError: YAML parsing error in config.yaml: ...
+ValueError: JSON parsing error in mcp.json: ...
 ```
 
 ## Examples
 
 ### Minimal Configuration
 
-```yaml
-underlying_servers:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
 ```
 
 ### Multiple Servers
 
-```yaml
-underlying_servers:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-  
-  - name: git
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-git", "/path/to/repo"]
-  
-  - name: python_server
-    command: python
-    args: ["-m", "my_mcp_server"]
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    },
+    "git": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-git", "/path/to/repo"]
+    },
+    "python-server": {
+      "command": "python",
+      "args": ["-m", "my_mcp_server"]
+    }
+  }
+}
 ```
 
 ### With Environment Variables
 
-```yaml
-underlying_servers:
-  - name: api_server
-    command: python
-    args: ["-m", "api_server"]
-    env:
-      API_KEY: "secret-key"
-      DEBUG: "false"
-      LOG_LEVEL: "INFO"
+```json
+{
+  "mcpServers": {
+    "api-server": {
+      "command": "python",
+      "args": ["-m", "api_server"],
+      "env": {
+        "API_KEY": "secret-key",
+        "DEBUG": "false",
+        "LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
 ```
 
 ### Empty Configuration
 
-```yaml
-underlying_servers: []
+```json
+{
+  "mcpServers": {}
+}
 ```
 
-Or simply an empty file (returns empty list).
+Or an empty file (returns empty list).
 
 ## Programmatic Usage
 
@@ -196,11 +196,11 @@ Or simply an empty file (returns empty list).
 ```python
 from mcp_proxy.config import load_config
 
-# Load from default location (config.yaml)
+# Load from default location (mcp.json)
 servers = load_config()
 
 # Load from custom location
-servers = load_config("/path/to/custom_config.yaml")
+servers = load_config("/path/to/custom_mcp.json")
 ```
 
 ### Using Pydantic Models Directly
@@ -209,48 +209,53 @@ servers = load_config("/path/to/custom_config.yaml")
 from mcp_proxy.config import ServerConfig, ProxyConfig
 
 # Create a server configuration
-server = ServerConfig(
-    name="filesystem",
-    command="npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-)
+server_data = {
+    "name": "filesystem",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+}
 
-# Create full configuration
-config = ProxyConfig(
-    underlying_servers=[server]
-)
+server = ServerConfig.model_validate(server_data)
 
 # Validate and convert to dict
-config_dict = config.model_dump()
+config_dict = server.model_dump()
 ```
 
 ## Best Practices
 
 1. **Use Descriptive Names**: Choose clear, descriptive server names
-   - Good: `filesystem`, `git_server`, `api_backend`
+   - Good: `filesystem`, `git-server`, `api-backend`
    - Bad: `s1`, `server`, `test`
 
-2. **Keep Names Simple**: Use alphanumeric characters, underscores, and hyphens only
+2. **Keep Names Simple**: Use alphanumeric characters, underscores, and hyphens
    - Avoid special characters that might cause issues
 
 3. **Validate Early**: Test your configuration before deploying
    ```bash
-   python -c "from mcp_proxy.config import load_config; load_config('config.yaml')"
+   python -c "from mcp_proxy.config import load_config; load_config('mcp.json')"
    ```
 
-4. **Use Environment Variables**: For sensitive data like API keys, use the `env` field
-   ```yaml
-   env:
-     API_KEY: "${API_KEY}"  # Use environment variable substitution if your YAML parser supports it
+4. **Use Environment Variables**: For sensitive data like API keys
+   ```json
+   {
+     "env": {
+       "API_KEY": "${API_KEY}"
+     }
+   }
    ```
+   Note: Environment variable substitution depends on your shell/environment
 
-5. **Document Your Configuration**: Add comments to explain server purposes
-   ```yaml
-   underlying_servers:
-     # Filesystem access server
-     - name: filesystem
-       command: npx
-       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+5. **Document Your Configuration**: Add comments in a separate README
+   ```json
+   {
+     "mcpServers": {
+       "filesystem": {
+         "comment": "Provides file system access to /tmp only",
+         "command": "npx",
+         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+       }
+     }
+   }
    ```
 
 ## Troubleshooting
@@ -268,54 +273,79 @@ If validation fails:
 1. Check the error message for the specific field and issue
 2. Verify the field name is correct (case-sensitive)
 3. Check for duplicate server names
-4. Ensure YAML syntax is correct
+4. Ensure JSON syntax is correct
 
 ### Common Issues
 
 **Issue**: "Field required" error
-- **Solution**: Ensure all required fields (`name`, `command`) are present
+- **Solution**: Ensure all required fields (`command`) are present
 
 **Issue**: "Duplicate server names" error
-- **Solution**: Ensure each server has a unique `name`
+- **Solution**: Ensure each server has a unique name
 
-**Issue**: "String should match pattern" error
-- **Solution**: Check that server names contain only alphanumeric characters, underscores, and hyphens
+**Issue**: JSON parsing errors
+- **Solution**: Validate your JSON syntax using a JSON validator or linter
 
-**Issue**: YAML parsing errors
-- **Solution**: Validate your YAML syntax using a YAML validator or linter
+## Comparison with Claude Desktop Config
+
+The proxy `mcp.json` format is **identical** to Claude Desktop's configuration format. You can copy server configurations directly between them:
+
+**Claude Desktop config** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
+```
+
+**MCP Proxy config** (`mcp.json`):
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
+```
+
+Same format! This makes migration and configuration management much easier.
 
 ## Advanced Configuration
 
-### Custom Validation
+### Multiple Instances of Same Server
 
-You can extend the Pydantic models to add custom validation:
-
-```python
-from mcp_proxy.config import ServerConfig
-from pydantic import field_validator
-
-class CustomServerConfig(ServerConfig):
-    @field_validator("name")
-    @classmethod
-    def validate_name_prefix(cls, v: str) -> str:
-        if not v.startswith("prod_"):
-            raise ValueError("Production servers must start with 'prod_'")
-        return v
+```json
+{
+  "mcpServers": {
+    "fs-home": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+    },
+    "fs-projects": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+    }
+  }
+}
 ```
 
-### Configuration Schema
+### Using uv to Run Python Servers
 
-The Pydantic models generate JSON schemas that can be used for:
-- IDE autocomplete
-- Configuration file validation
-- Documentation generation
-
-Access the schema:
-```python
-from mcp_proxy.config import ProxyConfig
-
-schema = ProxyConfig.model_json_schema()
-print(schema)
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "my_mcp_server"]
+    }
+  }
+}
 ```
 
 ## See Also
@@ -323,4 +353,4 @@ print(schema)
 - [Architecture Documentation](ARCHITECTURE.md) - System architecture
 - [Quick Reference Guide](QUICK_REFERENCE.md) - Quick lookup
 - [Main README](../README.md) - Project overview
-
+- [Migration Guide](MIGRATION_GUIDE.md) - Migrating from other formats

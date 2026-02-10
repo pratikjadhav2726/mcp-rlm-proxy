@@ -13,16 +13,20 @@ uv sync
 Copy the example config and edit it:
 
 ```bash
-cp config.yaml.example config.yaml
+cp mcp.json.example mcp.json
 ```
 
-Edit `config.yaml` to add your MCP servers. For example:
+Edit `mcp.json` to add your MCP servers. For example:
 
-```yaml
-underlying_servers:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
 ```
 
 ## Step 3: Run the Proxy Server
@@ -37,7 +41,7 @@ mcp-proxy
 ```
 
 The server will:
-- Load configuration from `config.yaml`
+- Load configuration from `mcp.json`
 - Connect to all configured servers
 - Start listening for MCP client connections via stdio
 
@@ -91,10 +95,10 @@ When calling tools through the proxy, use the format: `server_name::tool_name`
 ## Troubleshooting
 
 **Problem**: "Config file not found"
-- **Solution**: Create `config.yaml` from `config.yaml.example`
+- **Solution**: Create `mcp.json` from `mcp.json.example`
 
 **Problem**: "Failed to connect to server"
-- **Solution**: Check that the server command and args are correct in `config.yaml`
+- **Solution**: Check that the server command and args are correct in `mcp.json`
 
 **Problem**: "Tool name must be in format 'server::tool'"
 - **Solution**: Use the format `server_name::tool_name` when calling tools

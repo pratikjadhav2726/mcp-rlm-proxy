@@ -1,6 +1,13 @@
 """
 MCP Proxy Server implementation.
+
+Provides a transparent proxy between MCP clients and underlying MCP tool
+servers, with automatic large-response handling and first-class proxy tools
+(``proxy_filter``, ``proxy_search``, ``proxy_explore``) for efficient
+recursive exploration of tool outputs.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
@@ -15,500 +22,753 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Content, TextContent, Tool, ServerCapabilities
 
+from mcp_proxy.cache import SmartCacheManager
+from mcp_proxy.config import ProxySettings
 from mcp_proxy.logging_config import get_logger
-from mcp_proxy.processors import GrepProcessor, ProjectionProcessor
+from mcp_proxy.processors import (
+    GrepProcessor,
+    ProcessorPipeline,
+    ProcessorResult,
+    ProjectionProcessor,
+    _measure_content,
+)
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+class ConnectionPoolMetrics:
+    """Tracks metrics for connection pool and token savings."""
+    
+    def __init__(self) -> None:
+        self.total_calls = 0
+        self.total_original_tokens = 0
+        self.total_filtered_tokens = 0
+        self.projection_calls = 0
+        self.grep_calls = 0
+        self.auto_truncation_calls = 0
+        self.connection_count = 0
+        self.failed_connections = 0
+        
+    def record_call(
+        self,
+        original_tokens: int,
+        filtered_tokens: int,
+        used_projection: bool = False,
+        used_grep: bool = False,
+        auto_truncated: bool = False,
+    ) -> None:
+        self.total_calls += 1
+        self.total_original_tokens += original_tokens
+        self.total_filtered_tokens += filtered_tokens
+        if used_projection:
+            self.projection_calls += 1
+        if used_grep:
+            self.grep_calls += 1
+        if auto_truncated:
+            self.auto_truncation_calls += 1
+    
+    def get_summary(self) -> Dict[str, Any]:
+        if self.total_original_tokens == 0:
+            savings_percent = 0.0
+        else:
+            savings_percent = (
+                (self.total_original_tokens - self.total_filtered_tokens)
+                / self.total_original_tokens
+                * 100
+            )
+        return {
+            "total_calls": self.total_calls,
+            "projection_calls": self.projection_calls,
+            "grep_calls": self.grep_calls,
+            "auto_truncation_calls": self.auto_truncation_calls,
+            "total_original_tokens": self.total_original_tokens,
+            "total_filtered_tokens": self.total_filtered_tokens,
+            "tokens_saved": self.total_original_tokens - self.total_filtered_tokens,
+            "savings_percent": round(savings_percent, 2),
+            "active_connections": self.connection_count,
+            "failed_connections": self.failed_connections,
+        }
+    
+    def log_summary(self) -> None:
+        summary = self.get_summary()
+        if summary["total_calls"] > 0:
+            logger.info("=== Proxy Performance Summary ===")
+            logger.info("  Total calls: %d", summary["total_calls"])
+            logger.info("  Projection calls: %d", summary["projection_calls"])
+            logger.info("  Grep calls: %d", summary["grep_calls"])
+            logger.info("  Auto-truncated: %d", summary["auto_truncation_calls"])
+            logger.info("  Original tokens: %d", summary["total_original_tokens"])
+            logger.info("  Filtered tokens: %d", summary["total_filtered_tokens"])
+            logger.info("  Tokens saved: %d", summary["tokens_saved"])
+            logger.info("  Savings: %.1f%%", summary["savings_percent"])
+            logger.info("  Active connections: %d", summary["active_connections"])
+            logger.info("  Failed connections: %d", summary["failed_connections"])
+
+
+# ---------------------------------------------------------------------------
+# Proxy server
+# ---------------------------------------------------------------------------
+
+_SERVER_INSTRUCTIONS = (
+    "This proxy aggregates tools from multiple MCP servers. "
+    "Tool names are prefixed with the server name (e.g. filesystem_read_file). "
+    "When a tool response is large it is automatically truncated and cached. "
+    "The truncated response includes a cache_id you can use with these proxy "
+    "tools to drill into the data without re-executing the original call:\n"
+    "  - proxy_filter: project/filter specific fields from cached or fresh results\n"
+    "  - proxy_search: grep/bm25/fuzzy/context search on cached or fresh results\n"
+    "  - proxy_explore: discover data structure (keys, types, sizes) without loading content\n"
+    "All proxy tool parameters are flat top-level strings/arrays/integers — no nested objects required."
+)
 
 
 class MCPProxyServer:
     """MCP Proxy Server that intermediates between clients and underlying servers."""
 
-    def __init__(self, underlying_servers: Optional[List[Dict[str, Any]]] = None):
-        """
-        Initialize the proxy server.
+    def __init__(
+        self,
+        underlying_servers: Optional[List[Dict[str, Any]]] = None,
+        proxy_settings: Optional[ProxySettings] = None,
+    ) -> None:
+        self.settings = proxy_settings or ProxySettings()
 
-        Args:
-            underlying_servers: List of server configurations with 'name', 'command', 'args'
-        """
-        self.server = Server("mcp-proxy-server")
+        self.server = Server("mcp-rlm-proxy", instructions=_SERVER_INSTRUCTIONS)
+
         self.underlying_servers: Dict[str, ClientSession] = {}
         self.server_configs = underlying_servers or []
         self.tools_cache: Dict[str, List[Tool]] = {}
+
+        # Processors
         self.projection_processor = ProjectionProcessor()
         self.grep_processor = GrepProcessor()
-        # Store context managers and tasks to keep connections alive
+        self.pipeline = ProcessorPipeline([self.projection_processor, self.grep_processor])
+
+        # Response cache
+        self.cache = SmartCacheManager(
+            max_entries=self.settings.cache_max_entries,
+            ttl_seconds=self.settings.cache_ttl_seconds,
+        )
+
+        # Connection bookkeeping
         self._server_contexts: Dict[str, Any] = {}
         self._connection_tasks: Dict[str, asyncio.Task] = {}
+
+        # Metrics
+        self.metrics = ConnectionPoolMetrics()
 
         # Register handlers
         self._register_handlers()
 
-    def _enhance_tool_schema(self, input_schema: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
-        """
-        Enhance tool input schema to include _meta parameter for projection and grep.
+    # ------------------------------------------------------------------
+    # Handler registration
+    # ------------------------------------------------------------------
 
-        Args:
-            input_schema: Original tool input schema (dict or Pydantic model)
+    def _register_handlers(self) -> None:
+        """Register MCP server handlers (tools/list + tools/call)."""
 
-        Returns:
-            Enhanced schema with _meta parameter
-        """
-        # Convert to dict if it's a Pydantic model
-        if hasattr(input_schema, 'model_dump'):
-            schema_dict = input_schema.model_dump()
-        elif hasattr(input_schema, 'dict'):
-            schema_dict = input_schema.dict()
-        elif isinstance(input_schema, dict):
-            schema_dict = input_schema
-        else:
-            # Fallback: try to convert to dict
-            schema_dict = dict(input_schema) if input_schema else {}
-
-        # Create a deep copy to avoid modifying the original
-        enhanced_schema = json.loads(json.dumps(schema_dict))
-
-        # Ensure it's a valid JSON Schema object
-        if "type" not in enhanced_schema:
-            enhanced_schema["type"] = "object"
-
-        # Ensure properties exist
-        if "properties" not in enhanced_schema:
-            enhanced_schema["properties"] = {}
-
-        # CRITICAL: Override additionalProperties to True to allow _meta parameter
-        # Even if the original schema has additionalProperties: false, we need to allow _meta
-        enhanced_schema["additionalProperties"] = True
-
-        # Add _meta parameter
-        enhanced_schema["properties"]["_meta"] = {
-            "type": "object",
-            "description": "Optional metadata for field projection and grep filtering. Use this to optimize token usage and filter results.",
-            "properties": {
-                "projection": {
-                    "type": "object",
-                    "description": "Field projection to include/exclude specific fields from the response. Reduces token usage by 85-95% in many cases.",
-                    "properties": {
-                        "mode": {
-                            "type": "string",
-                            "enum": ["include", "exclude", "view"],
-                            "description": "Projection mode: 'include' returns only specified fields, 'exclude' returns all except specified fields, 'view' uses named preset views"
-                        },
-                        "fields": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "List of field paths to include/exclude. Supports nested paths like 'user.name' or 'users.email' for arrays."
-                        },
-                        "view": {
-                            "type": "string",
-                            "description": "Optional named view preset (used with mode='view')"
-                        }
-                    },
-                    "required": ["mode", "fields"]
-                },
-                "grep": {
-                    "type": "object",
-                    "description": "Grep-like search to filter tool outputs using regex patterns. Extracts only matching content.",
-                    "properties": {
-                        "pattern": {
-                            "type": "string",
-                            "description": "Regex pattern to search for in the tool output"
-                        },
-                        "caseInsensitive": {
-                            "type": "boolean",
-                            "default": False,
-                            "description": "Whether to perform case-insensitive matching"
-                        },
-                        "multiline": {
-                            "type": "boolean",
-                            "default": False,
-                            "description": "Enable multiline pattern matching. When true, '.' matches newlines and patterns can span multiple lines (similar to grep -P or re.DOTALL)"
-                        },
-                        "maxMatches": {
-                            "type": "number",
-                            "description": "Maximum number of matches to return"
-                        },
-                        "contextLines": {
-                            "type": "object",
-                            "description": "Include context lines around matches (similar to grep -A, -B, -C options)",
-                            "properties": {
-                                "before": {
-                                    "type": "number",
-                                    "default": 0,
-                                    "description": "Number of lines to include before each match (grep -B)"
-                                },
-                                "after": {
-                                    "type": "number",
-                                    "default": 0,
-                                    "description": "Number of lines to include after each match (grep -A)"
-                                },
-                                "both": {
-                                    "type": "number",
-                                    "default": 0,
-                                    "description": "Number of lines to include both before and after each match (grep -C). If specified, overrides 'before' and 'after'"
-                                }
-                            }
-                        },
-                        "target": {
-                            "type": "string",
-                            "enum": ["content", "structuredContent"],
-                            "default": "content",
-                            "description": "Where to search: 'content' for plain text, 'structuredContent' for JSON data"
-                        }
-                    },
-                    "required": ["pattern"]
-                }
-            },
-            "additionalProperties": False
-        }
-
-        # Note: We don't add "_meta" to required fields since it's optional
-        # The original required fields are preserved
-
-        return enhanced_schema
-
-    def _register_handlers(self):
-        """Register MCP server handlers."""
-
+        # ── list_tools ────────────────────────────────────────────────
         @self.server.list_tools()
         async def list_tools() -> List[Tool]:
-            """Aggregate tools from all underlying servers."""
-            all_tools = []
+            """Aggregate tools from all underlying servers plus proxy tools."""
+            all_tools: List[Tool] = []
 
             logger.debug("list_tools called")
-            logger.debug(f"underlying_servers keys: {list(self.underlying_servers.keys())}")
-            logger.debug(f"tools_cache keys: {list(self.tools_cache.keys())}")
+            logger.debug("underlying_servers keys: %s", list(self.underlying_servers.keys()))
+            logger.debug("tools_cache keys: %s", list(self.tools_cache.keys()))
 
-            # First, process cached tools
+            # ── 1. Register first-class proxy tools ───────────────────
+            all_tools.extend(self._build_proxy_tools())
+
+            # ── 2. Cached tools (clean pass-through) ──────────────────
             for server_name, cached_tools in self.tools_cache.items():
-                logger.debug(f"Using {len(cached_tools)} cached tools from {server_name}")
+                logger.debug("Using %d cached tools from %s", len(cached_tools), server_name)
                 for tool in cached_tools:
-                    # Enhance schema with _meta parameter
-                    enhanced_schema = self._enhance_tool_schema(tool.inputSchema)
-
-                    prefixed_tool = Tool(
+                    all_tools.append(
+                        Tool(
                         name=f"{server_name}_{tool.name}",
-                        description=tool.description or "",
-                        inputSchema=enhanced_schema,
+                            description=(tool.description or "") + f"\n(via {server_name})",
+                            inputSchema=self._clean_schema(tool.inputSchema),
                     )
-                    all_tools.append(prefixed_tool)
+                    )
 
-            # Parallelize tool listing from servers with cache misses or empty cache
+            # ── 3. Fetch from servers with cache misses ───────────────
             servers_to_fetch = [
-                (server_name, session)
-                for server_name, session in self.underlying_servers.items()
-                if server_name not in self.tools_cache or len(self.tools_cache.get(server_name, [])) == 0
+                (sn, sess)
+                for sn, sess in self.underlying_servers.items()
+                if sn not in self.tools_cache or not self.tools_cache.get(sn)
             ]
 
             if servers_to_fetch:
-                logger.debug(f"Fetching tools from {len(servers_to_fetch)} server(s) in parallel")
+                logger.debug("Fetching tools from %d server(s) in parallel", len(servers_to_fetch))
 
-                async def fetch_tools_from_server(server_name: str, session: ClientSession) -> tuple[str, List[Tool]]:
-                    """Fetch tools from a single server."""
+                async def _fetch(sn: str, sess: ClientSession) -> tuple[str, List[Tool]]:
                     try:
-                        logger.debug(f"Fetching tools from {server_name} session (cache miss or empty)")
-                        tools_result = await asyncio.wait_for(session.list_tools(), timeout=10.0)
-                        logger.debug(f"Got {len(tools_result.tools)} tools from {server_name} session")
-                        return server_name, tools_result.tools
+                        result = await asyncio.wait_for(sess.list_tools(), timeout=10.0)
+                        return sn, result.tools
                     except asyncio.TimeoutError:
-                        logger.error(f"Timeout fetching tools from {server_name} (10s)")
-                        return server_name, []
-                    except Exception as e:
-                        logger.error(f"Error listing tools from {server_name}: {e}", exc_info=True)
-                        return server_name, []
+                        logger.error("Timeout fetching tools from %s", sn)
+                        return sn, []
+                    except Exception as exc:
+                        logger.error("Error listing tools from %s: %s", sn, exc, exc_info=True)
+                        return sn, []
 
-                # Fetch tools from all servers in parallel
-                fetch_tasks = [
-                    fetch_tools_from_server(server_name, session)
-                    for server_name, session in servers_to_fetch
-                ]
-                results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+                results = await asyncio.gather(
+                    *(_fetch(sn, sess) for sn, sess in servers_to_fetch),
+                    return_exceptions=True,
+                )
 
-                # Process results and add tools
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Exception during parallel tool fetch: {result}", exc_info=True)
+                for res in results:
+                    if isinstance(res, Exception):
+                        logger.error("Exception during parallel tool fetch: %s", res, exc_info=True)
                         continue
-
-                    server_name, tools = result
+                    server_name, tools = res
                     if tools:
                         self.tools_cache[server_name] = tools
-                        logger.info(f"Loaded {len(tools)} tools from {server_name}")
-                        if tools:
-                            tool_names = [t.name for t in tools[:5]]
-                            logger.debug(f"Sample tools from {server_name}: {tool_names}{'...' if len(tools) > 5 else ''}")
-
-                        # Add tools with enhanced schemas
+                        logger.info("Loaded %d tools from %s", len(tools), server_name)
                         for tool in tools:
-                            enhanced_schema = self._enhance_tool_schema(tool.inputSchema)
-                            prefixed_tool = Tool(
+                            all_tools.append(
+                                Tool(
                                 name=f"{server_name}_{tool.name}",
-                                description=tool.description or "",
-                                inputSchema=enhanced_schema,
+                                    description=(tool.description or "") + f"\n(via {server_name})",
+                                    inputSchema=self._clean_schema(tool.inputSchema),
                             )
-                            all_tools.append(prefixed_tool)
+                            )
                     else:
-                        logger.warning(f"{server_name} returned 0 tools")
+                        logger.warning("%s returned 0 tools", server_name)
 
-            logger.debug(f"Returning {len(all_tools)} total tools")
+            logger.debug("Returning %d total tools", len(all_tools))
             return all_tools
 
+        # ── call_tool ─────────────────────────────────────────────────
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict) -> List[Content]:
             """Intercept tool calls, forward to underlying servers, and apply transformations."""
-            logger.debug(f"call_tool called: {name}")
+            logger.debug("call_tool called: %s", name)
 
-            # Validate arguments
+            # ── Proxy tools ───────────────────────────────────────────
+            if name == "proxy_filter":
+                return await self._handle_proxy_filter(arguments)
+            if name == "proxy_search":
+                return await self._handle_proxy_search(arguments)
+            if name == "proxy_explore":
+                return await self._handle_proxy_explore(arguments)
+
+            # ── Validate arguments ────────────────────────────────────
             if not isinstance(arguments, dict):
                 raise ValueError(f"Arguments must be a dictionary, got: {type(arguments)}")
 
-            # Extract meta from arguments (following the _meta convention from the discussion)
+            # Legacy _meta extraction (backward-compat, not advertised)
             meta = arguments.pop("_meta", None) if isinstance(arguments, dict) else None
-            if meta:
-                logger.debug(f"Meta found: {meta}")
-                # Validate meta structure
-                if not isinstance(meta, dict):
+            if meta and not isinstance(meta, dict):
                     raise ValueError("_meta must be a dictionary")
 
-            # Parse server_tool name (using underscore separator)
-            if "_" not in name:
-                raise ValueError(f"Tool name must be in format 'server_tool', got: {name}")
-
-            # Split on last underscore to handle tool names that might contain underscores
-            parts = name.rsplit("_", 1)
-            if len(parts) != 2:
-                raise ValueError(f"Tool name must be in format 'server_tool', got: {name}")
-            server_name, tool_name = parts
-            logger.debug(f"Parsed: server={server_name}, tool={tool_name}")
-
-            if server_name not in self.underlying_servers:
-                available = list(self.underlying_servers.keys())
-                logger.error(f"Unknown server: {server_name}. Available: {available}")
-                raise ValueError(f"Unknown server: {server_name}. Available servers: {', '.join(available) if available else 'none'}")
+            # ── Resolve server + tool ─────────────────────────────────
+            server_name, tool_name = self._resolve_tool_name(name)
 
             session = self.underlying_servers[server_name]
-            logger.debug(f"Got session for {server_name}, calling tool {tool_name}")
+            logger.debug("Parsed: server=%s, tool=%s", server_name, tool_name)
 
-            # Extract original tool from cache
-            original_tool = None
-            if server_name in self.tools_cache:
-                for tool in self.tools_cache[server_name]:
-                    if tool.name == tool_name:
-                        original_tool = tool
-                        break
-
-            # Track original content size for token savings calculation
-            original_size = 0
-
-            # Call underlying tool (arguments now have _meta removed) with timeout
+            # ── Call underlying tool ──────────────────────────────────
             try:
-                logger.debug(f"Calling tool {tool_name} on {server_name} with timeout 60s")
+                logger.debug("Calling tool %s on %s with timeout 60s", tool_name, server_name)
                 result = await asyncio.wait_for(session.call_tool(tool_name, arguments), timeout=60.0)
                 logger.debug("Tool call completed successfully")
             except asyncio.TimeoutError:
-                error_msg = f"Timeout calling tool {tool_name} on {server_name} (60s)"
-                logger.error(error_msg)
-                return [TextContent(type="text", text=f"Error: {error_msg}")]
-            except Exception as e:
-                error_msg = f"Error calling tool {tool_name} on {server_name}: {str(e)}"
-                logger.error(error_msg, exc_info=True)
-                return [TextContent(type="text", text=f"Error: {error_msg}")]
+                msg = f"Timeout calling tool {tool_name} on {server_name} (60s)"
+                logger.error(msg)
+                return [TextContent(type="text", text=f"Error: {msg}")]
+            except Exception as exc:
+                msg = f"Error calling tool {tool_name} on {server_name}: {exc}"
+                logger.error(msg, exc_info=True)
+                return [TextContent(type="text", text=f"Error: {msg}")]
 
-            # Extract content from result
-            content = result.content if hasattr(result, "content") else []
+            content: List[Content] = list(result.content) if hasattr(result, "content") else []
+            original_size = _measure_content(content)
 
-            # Calculate original size
-            for item in content:
-                if isinstance(item, TextContent):
-                    original_size += len(item.text)
-
-            # Apply transformations with error handling
-            transformation_meta = {}
+            # ── Legacy _meta processing ───────────────────────────────
             if meta:
-                # Apply projection
+                specs: Dict[str, Dict[str, Any]] = {}
                 if "projection" in meta:
-                    try:
-                        projection_spec = meta["projection"]
-                        if not isinstance(projection_spec, dict):
-                            raise ValueError("projection must be a dictionary")
-                        mode = projection_spec.get("mode", "include")
-                        if mode not in ["include", "exclude", "view"]:
-                            raise ValueError(f"Invalid projection mode: {mode}. Must be 'include', 'exclude', or 'view'")
-
-                        content = self.projection_processor.project_content(
-                            content, projection_spec
-                        )
-                        transformation_meta["projection"] = {
-                            "applied": True,
-                            "mode": mode,
-                        }
-                        logger.debug(f"Applied projection with mode: {mode}")
-                    except Exception as e:
-                        error_msg = f"Error applying projection: {str(e)}"
-                        logger.error(error_msg, exc_info=True)
-                        return [TextContent(type="text", text=f"Error: {error_msg}")]
-
-                # Apply grep
+                    specs["projection"] = meta["projection"]
                 if "grep" in meta:
+                    specs["grep"] = meta["grep"]
+                if specs:
                     try:
-                        grep_spec = meta["grep"]
-                        if not isinstance(grep_spec, dict):
-                            raise ValueError("grep must be a dictionary")
-                        if "pattern" not in grep_spec:
-                            raise ValueError("grep must include a 'pattern' field")
+                        pipe_result = self.pipeline.execute(content, specs)
+                        content = pipe_result.content
+                    except Exception as exc:
+                        msg = f"Error applying _meta transformations: {exc}"
+                        logger.error(msg, exc_info=True)
+                        return [TextContent(type="text", text=f"Error: {msg}")]
 
-                        content = self.grep_processor.apply_grep(content, grep_spec)
-                        transformation_meta["grep"] = {
-                            "applied": True,
-                            "pattern": grep_spec.get("pattern"),
-                        }
-                        logger.debug(f"Applied grep with pattern: {grep_spec.get('pattern')}")
-                    except Exception as e:
-                        error_msg = f"Error applying grep: {str(e)}"
-                        logger.error(error_msg, exc_info=True)
-                        return [TextContent(type="text", text=f"Error: {error_msg}")]
+            # ── Auto-truncation + caching ─────────────────────────────
+            new_size = _measure_content(content)
+            auto_truncated = False
 
-            # Calculate token savings
-            new_size = sum(len(item.text) for item in content if isinstance(item, TextContent))
+            if (
+                self.settings.enable_auto_truncation
+                and new_size > self.settings.max_response_size
+            ):
+                cache_id = self.cache.put(content, name, arguments)
+                truncated_text = self._truncate_content(content, self.settings.max_response_size)
+                hint = (
+                    f"\n\n--- Response truncated ({new_size:,} chars). "
+                    f"Full result cached as cache_id=\"{cache_id}\". "
+                    f"Use proxy_filter, proxy_search, or proxy_explore with this cache_id "
+                    f"to drill into the data. ---"
+                )
+                content = [TextContent(type="text", text=truncated_text + hint)]
+                auto_truncated = True
+                new_size = _measure_content(content)
+
+            # ── Metrics ───────────────────────────────────────────────
+            used_projection = bool(meta and "projection" in meta)
+            used_grep = bool(meta and "grep" in meta)
+            self.metrics.record_call(
+                original_size, new_size, used_projection, used_grep, auto_truncated
+            )
+
             if original_size > 0:
-                savings_percent = ((original_size - new_size) / original_size) * 100
-                transformation_meta["token_savings"] = {
-                    "original_size": original_size,
-                    "new_size": new_size,
-                    "savings_percent": round(savings_percent, 2),
-                }
+                savings = ((original_size - new_size) / original_size) * 100
+                logger.info(
+                    "Token savings: %d -> %d tokens (%.1f%% reduction)",
+                    original_size,
+                    new_size,
+                    savings,
+                )
 
             return content
+    
+    # ------------------------------------------------------------------
+    # Proxy tool definitions
+    # ------------------------------------------------------------------
 
-    async def _connect_to_server_sync(self, server_name: str, server_params: StdioServerParameters):
-        """Connect to a server synchronously and keep connection alive using background task."""
-        logger.debug(f"_connect_to_server_sync called for {server_name}")
+    @staticmethod
+    def _build_proxy_tools() -> List[Tool]:
+        """Return the three first-class proxy tools with flat, simple schemas."""
+        return [
+            Tool(
+                name="proxy_filter",
+                description=(
+                    "Filter/project specific fields from a cached or fresh tool result. "
+                    "Use this when a previous tool response was truncated and you received a cache_id, "
+                    "or supply tool+arguments to call and filter in one step.\n\n"
+                    "Modes: include (whitelist fields), exclude (blacklist fields)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "cache_id": {
+                            "type": "string",
+                            "description": "Cache ID from a previous truncated response. Use this OR tool+arguments.",
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Full tool name (e.g. filesystem_read_file) to call fresh. Use with 'arguments'.",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments for the fresh tool call (only used with 'tool').",
+                        },
+                        "fields": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Field paths to include/exclude (e.g. ['name', 'users.email']).",
+                        },
+                        "exclude": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Field paths to exclude. If provided, mode is auto-set to 'exclude'.",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["include", "exclude"],
+                            "description": "Projection mode. Defaults to 'include' if fields provided, 'exclude' if exclude provided.",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="proxy_search",
+                description=(
+                    "Search/grep within a cached or fresh tool result. "
+                    "Supports multiple search modes: regex (default), bm25, fuzzy, context.\n\n"
+                    "Use when you need to find specific content within a large response."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "cache_id": {
+                            "type": "string",
+                            "description": "Cache ID from a previous truncated response.",
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Full tool name to call fresh.",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments for fresh tool call.",
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "Search pattern (regex for regex mode, query text for bm25/fuzzy).",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["regex", "bm25", "fuzzy", "context"],
+                            "description": "Search mode. Defaults to 'regex'.",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results to return.",
+                        },
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Number of context lines around each match (regex mode).",
+                        },
+                        "case_insensitive": {
+                            "type": "boolean",
+                            "description": "Case-insensitive matching (regex mode). Default false.",
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "description": "Similarity threshold 0-1 (fuzzy mode). Default 0.7.",
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "Number of top chunks to return (bm25 mode). Default 5.",
+                        },
+                        "context_type": {
+                            "type": "string",
+                            "enum": ["paragraph", "section", "sentence", "lines"],
+                            "description": "Context extraction unit (context mode). Default 'paragraph'.",
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            ),
+            Tool(
+                name="proxy_explore",
+                description=(
+                    "Discover the structure of a cached or fresh tool result without loading "
+                    "all data. Returns types, field names, sizes, and a small sample. "
+                    "Use this first when you receive a large truncated response to understand "
+                    "the shape of the data before filtering."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "cache_id": {
+                            "type": "string",
+                            "description": "Cache ID from a previous truncated response.",
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Full tool name to call fresh.",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments for fresh tool call.",
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Maximum depth to explore. Default 3.",
+                        },
+                    },
+                },
+            ),
+        ]
 
-        # Use a background task to keep the connection alive
-        # This allows the context manager to stay open
-        connection_event = asyncio.Event()
-        connection_error = [None]
+    # ------------------------------------------------------------------
+    # Proxy tool handlers
+    # ------------------------------------------------------------------
 
-        async def _keep_connection():
-            """Background task to maintain connection."""
+    async def _resolve_content_source(
+        self, arguments: Dict[str, Any]
+    ) -> List[Content]:
+        """Resolve content from cache_id or by calling a tool fresh."""
+        cache_id = arguments.get("cache_id")
+        tool = arguments.get("tool")
+
+        if cache_id:
+            cached = self.cache.get(cache_id)
+            if cached is None:
+                raise ValueError(
+                    f"Cache entry '{cache_id}' not found or expired. "
+                    "Re-call the original tool to get a new cache_id."
+                )
+            return cached
+
+        if tool:
+            tool_args = arguments.get("arguments", {})
+            server_name, tool_name = self._resolve_tool_name(tool)
+            session = self.underlying_servers[server_name]
             try:
-                logger.debug(f"Background task: Creating stdio_client for {server_name}...")
-                logger.debug(f"Background task: server_params command={server_params.command}, args={server_params.args}")
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, tool_args), timeout=60.0
+                )
+                content = list(result.content) if hasattr(result, "content") else []
+                # Cache the fresh result for potential follow-up
+                cid = self.cache.put(content, tool, tool_args)
+                logger.debug("Fresh call cached as %s", cid)
+                return content
+            except asyncio.TimeoutError:
+                raise ValueError(f"Timeout calling tool {tool} (60s)")
+            except Exception as exc:
+                raise ValueError(f"Error calling tool {tool}: {exc}")
 
-                # Use stdio_client context manager - this properly isolates subprocess streams
+        raise ValueError(
+            "Provide either 'cache_id' (from a previous truncated response) "
+            "or 'tool' + 'arguments' to call a tool fresh."
+        )
+
+    async def _handle_proxy_filter(self, arguments: Dict[str, Any]) -> List[Content]:
+        """Handle proxy_filter tool call."""
+        content = await self._resolve_content_source(arguments)
+
+        fields = arguments.get("fields")
+        exclude = arguments.get("exclude")
+        mode = arguments.get("mode")
+
+        if exclude and not mode:
+            mode = "exclude"
+        elif not mode:
+            mode = "include"
+
+        projection_fields = exclude if mode == "exclude" else fields
+        if not projection_fields:
+            return [TextContent(type="text", text="Error: Provide 'fields' or 'exclude' to filter.")]
+
+        spec = {"mode": mode, "fields": projection_fields}
+        result = self.projection_processor.process(content, spec)
+
+        self.metrics.record_call(
+            result.original_size, result.filtered_size, used_projection=True
+        )
+        return result.content
+
+    async def _handle_proxy_search(self, arguments: Dict[str, Any]) -> List[Content]:
+        """Handle proxy_search tool call."""
+        content = await self._resolve_content_source(arguments)
+
+        pattern = arguments.get("pattern", "")
+        if not pattern:
+            return [TextContent(type="text", text="Error: 'pattern' is required for proxy_search.")]
+
+        mode = arguments.get("mode", "regex")
+
+        grep_spec: Dict[str, Any] = {"mode": mode, "pattern": pattern}
+
+        # Map flat parameters → grep spec
+        if arguments.get("max_results"):
+            grep_spec["maxMatches"] = arguments["max_results"]
+            grep_spec["topK"] = arguments["max_results"]
+        if arguments.get("context_lines"):
+            grep_spec["contextLines"] = {"both": arguments["context_lines"]}
+        if arguments.get("case_insensitive"):
+            grep_spec["caseInsensitive"] = True
+        if arguments.get("threshold"):
+            grep_spec["threshold"] = arguments["threshold"]
+        if arguments.get("top_k"):
+            grep_spec["topK"] = arguments["top_k"]
+        if arguments.get("context_type"):
+            grep_spec["contextType"] = arguments["context_type"]
+        # For bm25, alias pattern as query
+        if mode == "bm25":
+            grep_spec["query"] = pattern
+
+        result = self.grep_processor.process(content, grep_spec)
+        self.metrics.record_call(
+            result.original_size, result.filtered_size, used_grep=True
+        )
+        return result.content
+
+    async def _handle_proxy_explore(self, arguments: Dict[str, Any]) -> List[Content]:
+        """Handle proxy_explore tool call."""
+        content = await self._resolve_content_source(arguments)
+        max_depth = arguments.get("max_depth", 3)
+
+        grep_spec = {"mode": "structure", "maxDepth": max_depth}
+        result = self.grep_processor.process(content, grep_spec)
+        return result.content
+
+    # ------------------------------------------------------------------
+    # Schema helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clean_schema(input_schema: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
+        """Return a clean dict copy of a tool schema (no mutations)."""
+        if hasattr(input_schema, "model_dump"):
+            return input_schema.model_dump()
+        if hasattr(input_schema, "dict"):
+            return input_schema.dict()
+        if isinstance(input_schema, dict):
+            return dict(input_schema)
+        return dict(input_schema) if input_schema else {"type": "object", "properties": {}}
+
+    # ------------------------------------------------------------------
+    # Tool-name resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_tool_name(self, name: str) -> tuple[str, str]:
+        """Parse ``{server}_{tool}`` and validate against known servers."""
+        if "_" not in name:
+            raise ValueError(f"Tool name must be in format 'server_tool', got: {name}")
+
+        # Try known server prefixes first
+        for known_server in self.underlying_servers:
+            if name.startswith(known_server + "_"):
+                return known_server, name[len(known_server) + 1:]
+
+        # Fallback: rsplit
+        parts = name.rsplit("_", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Tool name must be in format 'server_tool', got: {name}")
+
+        server_name, tool_name = parts
+        if server_name not in self.underlying_servers:
+            available = list(self.underlying_servers.keys())
+            raise ValueError(
+                f"Unknown server: '{server_name}'. Available: {', '.join(available) or 'none'}. "
+                f"Tool name format: {{server_name}}_{{tool_name}}. "
+                f"Call list_tools() to see all available tool names."
+            )
+        return server_name, tool_name
+
+    # ------------------------------------------------------------------
+    # Truncation helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_content(content: List[Content], max_chars: int) -> str:
+        """Concatenate TextContent items and truncate to *max_chars*."""
+        parts: List[str] = []
+        total = 0
+        for item in content:
+            if isinstance(item, TextContent):
+                remaining = max_chars - total
+                if remaining <= 0:
+                    break
+                text = item.text[:remaining]
+                parts.append(text)
+                total += len(text)
+        return "".join(parts)
+
+    # ------------------------------------------------------------------
+    # Connection management (unchanged from original)
+    # ------------------------------------------------------------------
+
+    async def _connect_to_server_sync(
+        self, server_name: str, server_params: StdioServerParameters
+    ) -> None:
+        """Connect to a server and keep connection alive via a background task."""
+        logger.debug("_connect_to_server_sync called for %s", server_name)
+
+        connection_event = asyncio.Event()
+        connection_error: list[Optional[Exception]] = [None]
+
+        async def _keep_connection() -> None:
+            try:
                 async with stdio_client(server_params) as (read_stream, write_stream):
-                    logger.debug(f"Background task: Got streams for {server_name}")
-
-                    # Use ClientSession as context manager (like direct test) but keep it alive
-                    # by not exiting the context
-                    logger.debug(f"Background task: Creating ClientSession for {server_name}...")
                     session_obj = ClientSession(read_stream, write_stream)
                     session = await session_obj.__aenter__()
-                    # Store the session object for cleanup
                     self._server_contexts[server_name] = session_obj
 
                     try:
-                        # Initialize with timeout
-                        logger.debug(f"Background task: Initializing session for {server_name}...")
                         try:
                             init_result = await asyncio.wait_for(session.initialize(), timeout=30.0)
-                            logger.info(f"Connected to underlying server: {server_name}")
+                            logger.info("Connected to underlying server: %s", server_name)
                             if init_result.serverInfo:
-                                logger.info(f"     Server: {init_result.serverInfo.name}, Version: {init_result.serverInfo.version}")
+                                logger.info(
+                                    "     Server: %s, Version: %s",
+                                    init_result.serverInfo.name,
+                                    init_result.serverInfo.version,
+                                )
                         except asyncio.TimeoutError:
-                            logger.error(f"Timeout initializing session for {server_name} (30s)")
+                            logger.error("Timeout initializing %s (30s)", server_name)
                             connection_error[0] = Exception(f"Timeout connecting to {server_name}")
                             connection_event.set()
                             await session_obj.__aexit__(None, None, None)
                             return
-                        except Exception as e:
-                            logger.error(f"Exception during initialization: {e}", exc_info=True)
-                            connection_error[0] = e
+                        except Exception as exc:
+                            logger.error("Init exception for %s: %s", server_name, exc, exc_info=True)
+                            connection_error[0] = exc
                             connection_event.set()
                             await session_obj.__aexit__(None, None, None)
                             return
 
-                        # Store session immediately
                         self.underlying_servers[server_name] = session
-                        logger.debug(f"Background task: Session stored for {server_name}")
+                        self.metrics.connection_count += 1
 
                         # Pre-load tools
                         try:
-                            logger.debug(f"Background task: Listing tools for {server_name}...")
                             tools_result = await asyncio.wait_for(session.list_tools(), timeout=10.0)
-                            logger.debug(f"Background task: Got {len(tools_result.tools)} tools from {server_name}")
-                            logger.info(f"     Loaded {len(tools_result.tools)} tools from {server_name}")
+                            logger.info("     Loaded %d tools from %s", len(tools_result.tools), server_name)
                             self.tools_cache[server_name] = tools_result.tools
                             if tools_result.tools:
-                                tool_names = [t.name for t in tools_result.tools[:5]]
-                                logger.info(f"     Sample tools: {tool_names}{'...' if len(tools_result.tools) > 5 else ''}")
-                            else:
-                                logger.warning(f"{server_name} returned 0 tools")
-                        except Exception as e:
-                            logger.error(f"Could not list tools from {server_name}: {e}", exc_info=True)
+                                sample = [t.name for t in tools_result.tools[:5]]
+                                logger.info(
+                                    "     Sample tools: %s%s",
+                                    sample,
+                                    "..." if len(tools_result.tools) > 5 else "",
+                                )
+                        except Exception as exc:
+                            logger.error("Could not list tools from %s: %s", server_name, exc, exc_info=True)
 
-                        # Signal that connection is ready
                         connection_event.set()
-                        logger.debug(f"Background task: Connection ready for {server_name}")
 
-                        # Keep connection alive by waiting (both contexts stay open)
                         try:
-                            await asyncio.Event().wait()  # Wait forever
+                            await asyncio.Event().wait()
                         except asyncio.CancelledError:
-                            logger.info(f"Connection to {server_name} cancelled")
-                            if server_name in self.underlying_servers:
-                                del self.underlying_servers[server_name]
-                            if server_name in self._server_contexts:
+                            logger.info("Connection to %s cancelled", server_name)
+                            self.underlying_servers.pop(server_name, None)
+                            ctx = self._server_contexts.pop(server_name, None)
+                            if ctx:
                                 try:
-                                    await self._server_contexts[server_name].__aexit__(None, None, None)
+                                    await ctx.__aexit__(None, None, None)
                                 except Exception:
                                     pass
-                                del self._server_contexts[server_name]
                             raise
                     finally:
-                        # Clean up session context if we exit
-                        if server_name in self._server_contexts:
+                        ctx = self._server_contexts.pop(server_name, None)
+                        if ctx:
                             try:
-                                await self._server_contexts[server_name].__aexit__(None, None, None)
+                                await ctx.__aexit__(None, None, None)
                             except Exception:
                                 pass
-                            del self._server_contexts[server_name]
 
-            except Exception as e:
-                logger.error(f"Connection task failed for {server_name}: {e}", exc_info=True)
-                connection_error[0] = e
+            except Exception as exc:
+                logger.error("Connection task failed for %s: %s", server_name, exc, exc_info=True)
+                connection_error[0] = exc
                 connection_event.set()
-                if server_name in self.underlying_servers:
-                    del self.underlying_servers[server_name]
+                self.underlying_servers.pop(server_name, None)
 
-        # Start background task
         task = asyncio.create_task(_keep_connection())
         self._connection_tasks[server_name] = task
 
-        # Wait for connection to be established (with timeout)
-        logger.debug(f"Waiting for connection to {server_name} to be established...")
         try:
             await asyncio.wait_for(connection_event.wait(), timeout=35.0)
         except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for connection to {server_name}")
+            logger.error("Timeout waiting for connection to %s", server_name)
             task.cancel()
             raise Exception(f"Timeout waiting for connection to {server_name}")
 
-        # Check for errors
         if connection_error[0]:
             raise connection_error[0]
 
-        logger.debug(f"Connection setup complete for {server_name}")
-
-    async def initialize_underlying_servers(self):
+    async def initialize_underlying_servers(self) -> None:
         """Initialize connections to underlying MCP servers."""
         if not self.server_configs:
             logger.info("No underlying servers configured.")
             return
 
-        logger.info(f"Initializing {len(self.server_configs)} underlying server(s)...")
+        logger.info("Initializing %d underlying server(s)...", len(self.server_configs))
 
         for config in self.server_configs:
             server_name = config["name"]
@@ -516,33 +776,26 @@ class MCPProxyServer:
             args = config.get("args", [])
 
             try:
-                logger.info(f"Connecting to {server_name}... (command: {command}, args: {args})")
-                server_params = StdioServerParameters(
-                    command=command,
-                    args=args,
-                    env=None,
-                )
-
-                # Connect synchronously - wait for it to complete
-                logger.debug(f"Calling _connect_to_server_sync for {server_name}...")
+                logger.info("Connecting to %s (command: %s, args: %s)", server_name, command, args)
+                server_params = StdioServerParameters(command=command, args=args, env=None)
                 await self._connect_to_server_sync(server_name, server_params)
-                logger.debug(f"Connection to {server_name} established")
+            except Exception as exc:
+                logger.error("Failed to connect to %s: %s", server_name, exc, exc_info=True)
+                self.metrics.failed_connections += 1
 
-            except Exception as e:
-                logger.error(f"Failed to start connection to {server_name}: {e}", exc_info=True)
-
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Clean up connections to underlying servers."""
         try:
             logger.info("Cleaning up connections...")
-            # Close all context managers
+            self.metrics.log_summary()
+            
             for server_name, session_obj in list(self._server_contexts.items()):
                 try:
                     await session_obj.__aexit__(None, None, None)
-                except Exception as e:
-                    logger.warning(f"Error closing {server_name}: {e}")
+                except Exception as exc:
+                    logger.warning("Error closing %s: %s", server_name, exc)
             self._server_contexts.clear()
-            # Cancel connection tasks
+
             for server_name, task in list(self._connection_tasks.items()):
                 if not task.done():
                     task.cancel()
@@ -553,42 +806,28 @@ class MCPProxyServer:
             self._connection_tasks.clear()
             self.underlying_servers.clear()
             self.tools_cache.clear()
+            self.cache.clear()
         except Exception:
-            pass  # Ignore errors during cleanup
+            pass
 
-    async def run(self):
+    async def run(self) -> None:
         """Run the proxy server."""
         try:
-            # Initialize underlying servers
             await self.initialize_underlying_servers()
 
-            # Build capabilities with experimental features
             capabilities = ServerCapabilities.model_validate({
                 "tools": {},
-                "experimental": {
-                    "projection": {
-                        "supported": True,
-                        "modes": ["include", "exclude", "view"],
-                    },
-                    "grep": {
-                        "supported": True,
-                        "maxPatternLength": 1000,
-                    },
-                },
             })
 
-            # Run the server
             async with stdio_server() as (read_stream, write_stream):
                 await self.server.run(
                     read_stream,
                     write_stream,
                     InitializationOptions.model_validate({
-                        "server_name": "mcp-proxy-server",
+                        "server_name": "mcp-rlm-proxy",
                         "server_version": "0.1.0",
                         "capabilities": capabilities.model_dump(),
                     }),
                 )
         finally:
-            # Clean up connections
             await self.cleanup()
-
