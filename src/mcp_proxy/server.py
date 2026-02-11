@@ -284,11 +284,6 @@ class MCPProxyServer:
             if not isinstance(arguments, dict):
                 raise ValueError(f"Arguments must be a dictionary, got: {type(arguments)}")
 
-            # Legacy _meta extraction (backward-compat, not advertised)
-            meta = arguments.pop("_meta", None) if isinstance(arguments, dict) else None
-            if meta and not isinstance(meta, dict):
-                    raise ValueError("_meta must be a dictionary")
-
             # ── Resolve server + tool ─────────────────────────────────
             server_name, tool_name = self._resolve_tool_name(name)
 
@@ -311,23 +306,6 @@ class MCPProxyServer:
 
             content: List[Content] = list(result.content) if hasattr(result, "content") else []
             original_size = _measure_content(content)
-
-            # ── Legacy _meta processing ───────────────────────────────
-            if meta:
-                specs: Dict[str, Dict[str, Any]] = {}
-                if "projection" in meta:
-                    specs["projection"] = meta["projection"]
-                if "grep" in meta:
-                    specs["grep"] = meta["grep"]
-                if specs:
-                    try:
-                        # Use async pipeline execution
-                        pipe_result = await self.pipeline.execute_async(content, specs)
-                        content = pipe_result.content
-                    except Exception as exc:
-                        msg = f"Error applying _meta transformations: {exc}"
-                        logger.error(msg, exc_info=True)
-                        return [TextContent(type="text", text=f"Error: {msg}")]
 
             # ── Auto-truncation + caching ─────────────────────────────
             new_size = _measure_content(content)
@@ -388,8 +366,11 @@ class MCPProxyServer:
                     logger.debug("Failed to generate RLM exploration metadata: %s", exc, exc_info=True)
 
             # ── Metrics ───────────────────────────────────────────────
-            used_projection = bool(meta and "projection" in meta)
-            used_grep = bool(meta and "grep" in meta)
+            # Legacy `_meta`-driven projection/grep support has been fully removed.
+            # `used_projection` and `used_grep` are now reserved for first-class
+            # proxy tools (see `_handle_proxy_filter` and `_handle_proxy_search`).
+            used_projection = False
+            used_grep = False
             self.metrics.record_call(
                 original_size, new_size, used_projection, used_grep, auto_truncated
             )
