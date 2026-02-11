@@ -39,66 +39,52 @@ python example_usage.py
 
 ## Quick Examples
 
-### Field Projection
+### Field Projection (via `proxy_filter`)
 
 ```python
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+# After a large response is truncated, you'll receive a cache_id like "agent_1:ABC123DEF456".
+# Use proxy_filter with that cache_id to get only specific fields.
 
-server_params = StdioServerParameters(
-    command="uv",
-    args=["run", "-m", "mcp_proxy"],
-    cwd="/path/to/mcp-rlm-proxy"
-)
-
-async with stdio_client(server_params) as (read, write):
-    async with ClientSession(read, write) as session:
-        await session.initialize()
-        
-        # Get only specific fields
-        result = await session.call_tool("filesystem_read_file", {
-            "path": "data.json",
-            "_meta": {
-                "projection": {
-                    "mode": "include",
-                    "fields": ["users.name", "users.email"]
-                }
-            }
-        })
-```
-
-### Grep Search
-
-```python
-# Search for errors in logs
-result = await session.call_tool("filesystem_read_file", {
-    "path": "app.log",
-    "_meta": {
-        "grep": {
-            "pattern": "ERROR|FATAL",
-            "caseInsensitive": True,
-            "maxMatches": 50,
-            "contextLines": {"both": 2}
-        }
-    }
+result = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:ABC123DEF456",
+    "fields": ["users.name", "users.email"],
+    "mode": "include"
 })
 ```
 
-### Combined Transformations
+### Grep Search (via `proxy_search`)
 
 ```python
-# Filter fields, then search within them
-result = await session.call_tool("api_get_users", {
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["name", "email", "status"]
-        },
-        "grep": {
-            "pattern": "gmail\\.com",
-            "target": "structuredContent"
-        }
-    }
+# Search for errors in a cached log response
+result = await session.call_tool("proxy_search", {
+    "cache_id": "agent_1:ABC123DEF456",
+    "pattern": "ERROR|FATAL",
+    "mode": "regex",
+    "case_insensitive": True,
+    "context_lines": 2,
+    "max_results": 50
+})
+```
+
+### Combined Transformations (projection + search)
+
+```python
+# Step 1: Call underlying tool through the proxy (may be truncated + cached)
+users = await session.call_tool("api_get_users", {"limit": 1000})
+# Assume response was truncated and you received cache_id="agent_1:ABC123DEF456"
+
+# Step 2: Project fields from the cached result
+projected = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:ABC123DEF456",
+    "fields": ["name", "email", "status"],
+    "mode": "include"
+})
+
+# Step 3: Search within the (same) cached result
+search_results = await session.call_tool("proxy_search", {
+    "cache_id": "agent_1:ABC123DEF456",
+    "pattern": "gmail\\.com",
+    "mode": "regex"
 })
 ```
 
@@ -120,7 +106,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Then ask Claude to use the tools with `_meta` parameters.
+Then ask Claude to use the proxy tools `proxy_filter`, `proxy_search`, and `proxy_explore`
+with the `cache_id` values returned from large tool responses.
 
 ### Custom Python Client
 
@@ -147,17 +134,13 @@ const client = new Client({
 
 await client.connect(transport);
 
-// Use tools with _meta
+// Use proxy tools
 const result = await client.callTool({
-  name: "filesystem_read_file",
+  name: "proxy_filter",
   arguments: {
-    path: "data.json",
-    _meta: {
-      projection: {
-        mode: "include",
-        fields: ["users.name"]
-      }
-    }
+    cache_id: "agent_1:ABC123DEF456",
+    fields: ["users.name"],
+    mode: "include"
   }
 });
 ```
@@ -168,16 +151,15 @@ const result = await client.callTool({
 
 ```python
 # Agent needs to find authentication failures in logs
-failures = await session.call_tool("filesystem_read_file", {
-    "path": "/var/log/auth.log",
-    "_meta": {
-        "grep": {
-            "pattern": "authentication failure|Failed password",
-            "caseInsensitive": True,
-            "contextLines": {"before": 1, "after": 2},
-            "maxMatches": 100
-        }
-    }
+# 1) Call filesystem_read_file via proxy; assume it was truncated with cache_id="agent_1:LOGS123456".
+# 2) Use proxy_search on the cached log content.
+failures = await session.call_tool("proxy_search", {
+    "cache_id": "agent_1:LOGS123456",
+    "pattern": "authentication failure|Failed password",
+    "mode": "regex",
+    "case_insensitive": True,
+    "context_lines": 2,
+    "max_results": 100
 })
 
 # Result: Only relevant log lines (99.7% token savings)
@@ -187,14 +169,12 @@ failures = await session.call_tool("filesystem_read_file", {
 
 ```python
 # Agent needs user emails from large API response
-users = await session.call_tool("api_list_users", {
-    "limit": 1000,
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["users[].id", "users[].email"]
-        }
-    }
+# 1) Call api_list_users via proxy; assume response cached with cache_id="agent_1:USERS123456".
+# 2) Use proxy_filter to get only IDs and emails.
+users = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:USERS123456",
+    "fields": ["users[].id", "users[].email"],
+    "mode": "include"
 })
 
 # Result: Only IDs and emails (95% token savings)
@@ -204,14 +184,12 @@ users = await session.call_tool("api_list_users", {
 
 ```python
 # Agent needs user data but must exclude sensitive fields
-user = await session.call_tool("db_get_user", {
-    "userId": "123",
-    "_meta": {
-        "projection": {
-            "mode": "exclude",
-            "fields": ["password", "ssn", "credit_card", "api_key"]
-        }
-    }
+# 1) Call db_get_user via proxy; assume response cached with cache_id="agent_1:USER123456".
+# 2) Use proxy_filter to exclude sensitive fields.
+user = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:USER123456",
+    "fields": ["password", "ssn", "credit_card", "api_key"],
+    "mode": "exclude"
 })
 
 # Result: All data except sensitive fields
@@ -220,34 +198,37 @@ user = await session.call_tool("db_get_user", {
 ### Use Case 4: Recursive Exploration (RLM)
 
 ```python
-# Step 1: Discover structure
-fields = await session.call_tool("api_get_data", {
-    "_meta": {"projection": {"mode": "include", "fields": ["_keys"]}}
+# Step 1: Call api_get_data via proxy; assume response cached with cache_id="agent_1:DATA123456".
+# Step 2: Use proxy_explore to discover structure.
+structure = await session.call_tool("proxy_explore", {
+    "cache_id": "agent_1:DATA123456",
+    "max_depth": 3
 })
-# Returns: ["id", "name", "profile", ...]
 
-# Step 2: Get overview
-overview = await session.call_tool("api_get_data", {
-    "_meta": {"projection": {"mode": "include", "fields": ["id", "name"]}}
+# Step 3: Use proxy_filter to get an overview of key fields.
+overview = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:DATA123456",
+    "fields": ["id", "name"],
+    "mode": "include"
 })
-# Returns: Minimal data
 
-# Step 3: Drill down
-details = await session.call_tool("api_get_data", {
-    "_meta": {"projection": {"mode": "include", "fields": ["profile.bio"]}}
+# Step 4: Drill down into a specific nested field.
+details = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:DATA123456",
+    "fields": ["profile.bio"],
+    "mode": "include"
 })
-# Returns: Specific nested field
 
-# Total: 98% token savings vs loading everything
+# Total: ~98% token savings vs loading everything
 ```
 
 ## Tips
 
 1. **Start Simple**: Begin with basic projection, then add grep as needed
 2. **Monitor Savings**: Check proxy logs for token reduction metrics
-3. **Create Templates**: Design reusable `_meta` patterns for common queries
-4. **Iterate**: Use RLM pattern to explore data structure first, then query specifics
-5. **Test Patterns**: Use `comprehensive_example.py` to test different approaches
+3. **Design Flows**: Design reusable proxy_filter/proxy_search flows for common queries
+4. **Iterate**: Use RLM pattern (proxy_explore → proxy_filter → proxy_search) to explore, then query
+5. **Test Patterns**: Use `comprehensive_example.py` to test different proxy tool flows
 
 ## Troubleshooting
 

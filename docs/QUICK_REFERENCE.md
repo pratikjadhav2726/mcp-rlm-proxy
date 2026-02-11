@@ -44,19 +44,16 @@ result = await session.call_tool("filesystem_read_file", {
 })
 ```
 
-### With Field Projection
+### With Field Projection (via `proxy_filter`)
 
 #### Include Mode (Whitelist)
 
 ```python
-result = await session.call_tool("filesystem_read_file", {
-    "path": "/data/users.json",
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["id", "name", "email"]
-        }
-    }
+# After a large response is truncated, use proxy_filter with the cache_id.
+result = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:ABC123DEF456",
+    "fields": ["id", "name", "email"],
+    "mode": "include"
 })
 ```
 
@@ -73,29 +70,22 @@ fields = [
 #### Exclude Mode (Blacklist)
 
 ```python
-result = await session.call_tool("api_get_user", {
-    "userId": "123",
-    "_meta": {
-        "projection": {
-            "mode": "exclude",
-            "fields": ["password", "ssn", "internal_id"]
-        }
-    }
+result = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:USER123456",
+    "fields": ["password", "ssn", "internal_id"],
+    "mode": "exclude"
 })
 ```
 
-### With Grep Search
+### With Grep Search (via `proxy_search`)
 
 #### Basic Pattern
 
 ```python
-result = await session.call_tool("filesystem_read_file", {
-    "path": "/logs/app.log",
-    "_meta": {
-        "grep": {
-            "pattern": "ERROR"
-        }
-    }
+result = await session.call_tool("proxy_search", {
+    "cache_id": "agent_1:LOGS123456",
+    "pattern": "ERROR",
+    "mode": "regex"
 })
 ```
 
@@ -103,10 +93,9 @@ result = await session.call_tool("filesystem_read_file", {
 
 ```python
 {
-    "grep": {
-        "pattern": "error|warn|fatal",
-        "caseInsensitive": True
-    }
+    "pattern": "error|warn|fatal",
+    "mode": "regex",
+    "case_insensitive": True
 }
 ```
 
@@ -114,14 +103,9 @@ result = await session.call_tool("filesystem_read_file", {
 
 ```python
 {
-    "grep": {
-        "pattern": "Exception",
-        "contextLines": {
-            "before": 3,    # 3 lines before match
-            "after": 5,     # 5 lines after match
-            "both": 2       # Or 2 lines both (overrides before/after)
-        }
-    }
+    "pattern": "Exception",
+    "mode": "regex",
+    "context_lines": 2
 }
 ```
 
@@ -129,10 +113,9 @@ result = await session.call_tool("filesystem_read_file", {
 
 ```python
 {
-    "grep": {
-        "pattern": "TODO",
-        "maxMatches": 20    # Return max 20 matches
-    }
+    "pattern": "TODO",
+    "mode": "regex",
+    "max_results": 20
 }
 ```
 
@@ -140,10 +123,9 @@ result = await session.call_tool("filesystem_read_file", {
 
 ```python
 {
-    "grep": {
-        "pattern": "function.*{\\n.*return",
-        "multiline": True
-    }
+    "pattern": "function.*{\\n.*return",
+    "mode": "regex",
+    "multiline": True
 }
 ```
 
@@ -151,77 +133,61 @@ result = await session.call_tool("filesystem_read_file", {
 
 ```python
 {
-    "grep": {
-        "pattern": "gmail\\.com",
-        "target": "structuredContent"  # Search in JSON fields/values
-    }
+    "pattern": "gmail\\.com",
+    "mode": "regex"
 }
 ```
 
-### Combined: Projection + Grep
+### Combined: Projection + Search
 
 ```python
-result = await session.call_tool("api_search_users", {
-    "query": "*",
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["name", "email", "status"]
-        },
-        "grep": {
-            "pattern": "active",
-            "target": "structuredContent"
-        }
-    }
+# 1) Call api_search_users via proxy; assume truncated + cached with cache_id="agent_1:USERS123456".
+# 2) Project fields using proxy_filter.
+projected = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:USERS123456",
+    "fields": ["name", "email", "status"],
+    "mode": "include"
+})
+
+# 3) Search within projected/cached content using proxy_search.
+result = await session.call_tool("proxy_search", {
+    "cache_id": "agent_1:USERS123456",
+    "pattern": "active",
+    "mode": "regex"
 })
 ```
 
-**Processing order**: 
-1. Tool executes and returns full response
-2. Projection filters fields
-3. Grep searches in filtered content
-4. Minimal result returned to agent
-
 ## Common Patterns
 
-### Discover Structure First (RLM Pattern)
+### Discover Structure First (RLM Pattern) via `proxy_explore`
 
 ```python
-# Step 1: Get available fields
-structure = await session.call_tool("api_get_data", {
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["_keys"]  # Special: returns field names
-        }
-    }
+# Step 1: Call api_get_data via proxy; assume response cached with cache_id="agent_1:DATA123456".
+# Step 2: Use proxy_explore to discover structure.
+structure = await session.call_tool("proxy_explore", {
+    "cache_id": "agent_1:DATA123456",
+    "max_depth": 3
 })
 
-# Step 2: Request only needed fields
-data = await session.call_tool("api_get_data", {
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["id", "name", "email"]  # Based on discovery
-        }
-    }
+# Step 3: Request only needed fields with proxy_filter.
+data = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:DATA123456",
+    "fields": ["id", "name", "email"],
+    "mode": "include"
 })
 ```
 
 ### Log File Analysis
 
 ```python
-# Find errors with context
-errors = await session.call_tool("filesystem_read_file", {
-    "path": "/var/log/app.log",
-    "_meta": {
-        "grep": {
-            "pattern": "ERROR|FATAL",
-            "caseInsensitive": True,
-            "contextLines": {"both": 3},
-            "maxMatches": 50
-        }
-    }
+# Find errors with context using proxy_search
+errors = await session.call_tool("proxy_search", {
+    "cache_id": "agent_1:LOGS123456",
+    "pattern": "ERROR|FATAL",
+    "mode": "regex",
+    "case_insensitive": True,
+    "context_lines": 3,
+    "max_results": 50
 })
 ```
 
@@ -229,14 +195,10 @@ errors = await session.call_tool("filesystem_read_file", {
 
 ```python
 # Get only specific fields from large API response
-users = await session.call_tool("api_list_users", {
-    "limit": 1000,
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["users[].id", "users[].email", "users[].status"]
-        }
-    }
+users = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:USERS123456",
+    "fields": ["users[].id", "users[].email", "users[].status"],
+    "mode": "include"
 })
 ```
 
@@ -244,21 +206,17 @@ users = await session.call_tool("api_list_users", {
 
 ```python
 # Exclude sensitive data automatically
-user = await session.call_tool("db_get_user", {
-    "userId": "123",
-    "_meta": {
-        "projection": {
-            "mode": "exclude",
-            "fields": [
-                "password",
-                "password_hash",
-                "ssn",
-                "credit_card",
-                "api_key",
-                "internal_notes"
-            ]
-        }
-    }
+user = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:USER123456",
+    "fields": [
+        "password",
+        "password_hash",
+        "ssn",
+        "credit_card",
+        "api_key",
+        "internal_notes",
+    ],
+    "mode": "exclude"
 })
 ```
 
@@ -377,22 +335,11 @@ tools = await session.list_tools()
 print([t.name for t in tools.tools])  # See all available tools
 ```
 
-### "_meta is ignored"
+### "proxy tools not found"
 ```python
-# Ensure _meta is at same level as other arguments
-# ✗ Wrong:
-{
-    "path": "file.txt",
-    "options": {
-        "_meta": {"projection": ...}  # Too nested!
-    }
-}
-
-# ✓ Correct:
-{
-    "path": "file.txt",
-    "_meta": {"projection": ...}  # Same level as path
-}
+# Ensure you are connecting through the proxy and have the proxy tools registered:
+tools = await session.list_tools()
+print([t.name for t in tools.tools])  # Should include proxy_filter, proxy_search, proxy_explore
 ```
 
 ## Performance Tips
@@ -400,8 +347,8 @@ print([t.name for t in tools.tools])  # See all available tools
 1. **Use projection for structured data**: 90-95% token savings
 2. **Use grep for logs/text**: 99%+ token savings
 3. **Combine both**: Project fields, then grep within them
-4. **Discover first**: Use `"_keys"` to see available fields before requesting
-5. **Cache-friendly**: Same tool + args (excluding `_meta`) use cached results
+4. **Discover first**: Use `proxy_explore` to see available fields before requesting
+5. **Cache-friendly**: Same tool + args use cached results keyed by `cache_id`
 
 ## Token Savings Calculator
 

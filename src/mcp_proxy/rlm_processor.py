@@ -394,16 +394,16 @@ class FieldDiscoveryHelper:
             else:
                 summary["nested_fields"].append(field)
         
-        # Create a sample projection
+        # Create a sample proxy_filter call (RLM-style next step, no _meta)
         sample_fields = summary["top_level_fields"][:5]
         if sample_fields:
-            summary["sample_projection"] = {
-                "_meta": {
-                    "projection": {
-                        "mode": "include",
-                        "fields": sample_fields
-                    }
-                }
+            summary["sample_proxy_filter"] = {
+                "tool": "proxy_filter",
+                "arguments": {
+                    "cache_id": "<CACHE_ID_FROM_TRUNCATED_RESPONSE>",
+                    "fields": sample_fields,
+                    "mode": "include",
+                },
             }
         
         return summary

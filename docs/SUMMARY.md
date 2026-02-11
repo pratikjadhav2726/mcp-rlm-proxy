@@ -63,19 +63,17 @@ Benefits:
 ✓ Automatic token savings tracking
 ```
 
-**Example Call**:
+**Example RLM-Style Flow**:
 ```python
-# Read only needed fields
-result = await session.call_tool("filesystem_read_file", {
-    "path": "data.json",
-    "_meta": {
-        "projection": {
-            "mode": "include",
-            "fields": ["users.name", "users.email"]
-        }
-    }
+# 1) Call filesystem_read_file via proxy; assume response truncated with cache_id="agent_1:DATA123456".
+
+# 2) Use proxy_filter to read only needed fields from the cached response.
+result = await session.call_tool("proxy_filter", {
+    "cache_id": "agent_1:DATA123456",
+    "fields": ["users.name", "users.email"],
+    "mode": "include"
 })
-# Returns: 500 tokens (99% savings!)
+# Returns: ~500 tokens (99% savings!)
 ```
 
 ## Feature Comparison Matrix
@@ -127,7 +125,7 @@ Total: 550 tokens vs 50,000 tokens (99% savings)
 | RLM Concept | Implementation |
 |-------------|----------------|
 | **External Environment** | Tool outputs treated as queryable data stores |
-| **Programmatic Exploration** | Use `_meta` to selectively retrieve data |
+| **Programmatic Exploration** | Use proxy tools (`proxy_filter`, `proxy_search`, `proxy_explore`) to selectively retrieve data |
 | **Recursive Decomposition** | Break large outputs into explorable chunks |
 | **Snippet Processing** | Return only matched content + context |
 | **Context Efficiency** | 85-99% reduction in context window usage |
@@ -140,26 +138,32 @@ data = await call_tool("api_get_users")
 
 # RLM: Explore recursively (1,000 tokens total)
 
-# Step 1: Discover structure
-fields = await call_tool("api_get_users", {
-    "_meta": {"projection": {"mode": "include", "fields": ["_keys"]}}
-})
-# Returns: ["id", "name", "email", "profile", ...] (50 tokens)
+# Step 1: Call api_get_users via proxy; assume truncated + cached with cache_id="agent_1:USERS123456".
 
-# Step 2: Get overview
-overview = await call_tool("api_get_users", {
-    "_meta": {"projection": {"mode": "include", "fields": ["id", "name", "status"]}}
+# Step 2: Discover structure with proxy_explore
+fields = await call_tool("proxy_explore", {
+    "cache_id": "agent_1:USERS123456",
+    "max_depth": 3
 })
-# Returns: Basic info for all users (500 tokens)
+# Returns: structure summary and field names (≈50 tokens)
 
-# Step 3: Drill down
-details = await call_tool("api_get_user", {
-    "userId": "interesting_user",
-    "_meta": {"projection": {"mode": "include", "fields": ["email", "profile.bio"]}}
+# Step 3: Get overview with proxy_filter
+overview = await call_tool("proxy_filter", {
+    "cache_id": "agent_1:USERS123456",
+    "fields": ["id", "name", "status"],
+    "mode": "include"
 })
-# Returns: Specific user details (450 tokens)
+# Returns: Basic info for all users (≈500 tokens)
 
-# Total: 1,000 tokens vs 50,000 (98% savings)
+# Step 4: Drill down with proxy_filter
+details = await call_tool("proxy_filter", {
+    "cache_id": "agent_1:USERS123456",
+    "fields": ["email", "profile.bio"],
+    "mode": "include"
+})
+# Returns: Specific user details (≈450 tokens)
+
+# Total: ~1,000 tokens vs 50,000 (98% savings)
 ```
 
 ## When to Use This Proxy
