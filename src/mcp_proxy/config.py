@@ -140,7 +140,7 @@ class ServerConfig(BaseModel):
 
 class ProxyConfig(BaseModel):
     """
-    Root configuration model for the MCP Proxy Server.
+    Root configuration model for the MCP-RLM Proxy Server.
 
     Attributes:
         underlying_servers: List of server configurations

@@ -41,7 +41,7 @@ Repository = "https://github.com/pratikjadhav2726/mcp-rlm-proxy"
 Issues = "https://github.com/pratikjadhav2726/mcp-rlm-proxy/issues"
 
 [project.scripts]
-mcp-proxy = "mcp_proxy.__main__:main"
+mcp-rlm-proxy = "mcp_proxy.__main__:main"
 
 [dependency-groups]
 dev = [

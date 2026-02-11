@@ -1,6 +1,6 @@
-# MCP Proxy Examples
+# MCP-RLM Proxy Examples
 
-This directory contains usage examples for the MCP Proxy Server.
+This directory contains usage examples for the MCP-RLM Proxy Server.
 
 ## Available Examples
 

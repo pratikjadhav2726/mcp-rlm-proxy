@@ -1,6 +1,6 @@
 # Contributing to MCP‑RLM‑Proxy
 
-Thank you for your interest in contributing to MCP Proxy Server! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to MCP-RLM Proxy Server! This document provides guidelines and instructions for contributing.
 
 ## Code of Conduct
 

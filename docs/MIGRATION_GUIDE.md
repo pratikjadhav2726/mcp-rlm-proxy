@@ -35,7 +35,7 @@ pip install -e .
 #### Option B: From PyPI (When Available)
 
 ```bash
-pip install mcp-proxy-server
+pip install mcp-rlm-proxy
 ```
 
 ### Step 2: Gather Your Current Configuration
@@ -122,7 +122,7 @@ Start the proxy to verify it connects to all servers:
 uv run -m mcp_proxy
 
 # Or if installed as package
-mcp-proxy
+mcp-rlm-proxy
 ```
 
 You should see:

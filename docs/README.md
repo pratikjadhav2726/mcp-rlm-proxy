@@ -1,6 +1,6 @@
 # Documentation Index
 
-Welcome to the MCP Proxy Server documentation. This directory contains comprehensive documentation for the project.
+Welcome to the MCP-RLM Proxy Server documentation. This directory contains comprehensive documentation for the project.
 
 ## Documentation Files
 

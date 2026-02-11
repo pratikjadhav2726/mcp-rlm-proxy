@@ -1,5 +1,5 @@
 """
-Example usage of the MCP Proxy Server
+Example usage of the MCP-RLM Proxy Server
 
 This demonstrates how to use the proxy server with field projection and grep search.
 """
@@ -152,7 +152,7 @@ async def example_combined():
 
 async def main():
     """Run all examples."""
-    print("MCP Proxy Server Usage Examples\n")
+    print("MCP-RLM Proxy Server Usage Examples\n")
     print("=" * 50 + "\n")
     
     # Note: These examples are commented out because they require

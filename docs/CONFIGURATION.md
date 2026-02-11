@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MCP Proxy Server uses MCP client-style JSON configuration (`mcp.json`), which matches the standard configuration format used by Claude Desktop and other MCP clients. Configuration is validated using Pydantic for robustness.
+The MCP-RLM Proxy Server uses MCP client-style JSON configuration (`mcp.json`), which matches the standard configuration format used by Claude Desktop and other MCP clients. Configuration is validated using Pydantic for robustness.
 
 ## Configuration File
 
@@ -302,7 +302,7 @@ The proxy `mcp.json` format is **identical** to Claude Desktop's configuration f
 }
 ```
 
-**MCP Proxy config** (`mcp.json`):
+**MCP-RLM Proxy config** (`mcp.json`):
 ```json
 {
   "mcpServers": {

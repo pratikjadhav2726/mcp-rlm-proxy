@@ -1,5 +1,5 @@
 """
-Logging configuration for MCP Proxy Server.
+Logging configuration for MCP-RLM Proxy Server.
 """
 
 import logging
@@ -13,7 +13,7 @@ def setup_logging(
     stream: Optional[sys.stderr.__class__] = None,
 ) -> logging.Logger:
     """
-    Set up structured logging for the MCP Proxy Server.
+    Set up structured logging for the MCP-RLM Proxy Server.
 
     Args:
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)

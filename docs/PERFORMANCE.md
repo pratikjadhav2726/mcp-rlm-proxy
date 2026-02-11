@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MCP Proxy Server is designed for optimal performance with minimal overhead. This document describes performance characteristics, optimizations, and best practices.
+The MCP-RLM Proxy Server is designed for optimal performance with minimal overhead. This document describes performance characteristics, optimizations, and best practices.
 
 ## Performance Optimizations
 

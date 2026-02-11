@@ -1,4 +1,4 @@
 """
-Tests for MCP Proxy Server.
+Tests for MCP-RLM Proxy Server.
 """
 

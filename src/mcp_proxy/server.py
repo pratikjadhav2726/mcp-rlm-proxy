@@ -1,5 +1,5 @@
 """
-MCP Proxy Server implementation.
+MCP-RLM Proxy Server implementation.
 
 Provides a transparent proxy between MCP clients and underlying MCP tool
 servers, with automatic large-response handling and first-class proxy tools
@@ -129,7 +129,7 @@ _SERVER_INSTRUCTIONS = (
 
 
 class MCPProxyServer:
-    """MCP Proxy Server that intermediates between clients and underlying servers."""
+    """MCP-RLM Proxy Server that intermediates between clients and underlying servers."""
 
     def __init__(
         self,

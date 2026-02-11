@@ -41,7 +41,7 @@ Edit `mcp.json` to add your MCP servers. This uses the same format as Claude Des
 }
 ```
 
-## Step 3: Run the Proxy Server
+## Step 3: Run the MCP-RLM Proxy Server
 
 From the project root:
 
@@ -52,7 +52,7 @@ uv run -m mcp_proxy
 Or, after installation:
 
 ```bash
-mcp-proxy
+mcp-rlm-proxy
 ```
 
 The server will:

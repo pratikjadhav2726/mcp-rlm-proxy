@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MCP Proxy Server uses Python's standard `logging` module to provide structured, configurable logging throughout the application. This replaces the previous `print()` statements with a proper logging infrastructure.
+The MCP-RLM Proxy Server uses Python's standard `logging` module to provide structured, configurable logging throughout the application. This replaces the previous `print()` statements with a proper logging infrastructure.
 
 ## Features
 

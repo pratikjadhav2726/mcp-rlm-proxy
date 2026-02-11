@@ -9,8 +9,8 @@ from mcp.client.stdio import stdio_client
 
 
 async def quick_test():
-    """Quick test of proxy server."""
-    print("Testing MCP Proxy Server...")
+    """Quick test of MCP-RLM Proxy server."""
+    print("Testing MCP-RLM Proxy Server...")
     
     server_params = StdioServerParameters(
         command="uv",

@@ -9,8 +9,8 @@ from mcp.client.stdio import stdio_client
 
 
 async def test_with_everything():
-    """Test proxy server with everything server."""
-    print("Testing MCP Proxy Server with Everything Server")
+    """Test MCP-RLM Proxy server with everything server."""
+    print("Testing MCP-RLM Proxy Server with Everything Server")
     print("=" * 60)
     
     server_params = StdioServerParameters(

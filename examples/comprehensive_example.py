@@ -17,7 +17,7 @@ from mcp.client.stdio import stdio_client
 
 
 async def connect_to_proxy():
-    """Connect to the MCP proxy server."""
+    """Connect to the MCP-RLM proxy server."""
     server_params = StdioServerParameters(
         command="uv",
         args=["run", "-m", "mcp_proxy"],

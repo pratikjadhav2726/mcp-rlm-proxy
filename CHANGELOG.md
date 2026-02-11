@@ -152,13 +152,13 @@ underlying_servers:
 
 ### Added
 - Initial release
-- MCP Proxy Server implementation
+- MCP-RLM Proxy Server implementation
 - Field projection processor
 - Grep processor
 - Server connection management
 - Tool aggregation from multiple servers
 - Configuration loading from YAML
 
-[Unreleased]: https://github.com/yourusername/mcp-proxy-server/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yourusername/mcp-proxy-server/releases/tag/v0.1.0
+[Unreleased]: https://github.com/pratikjadhav2726/mcp-rlm-proxy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/pratikjadhav2726/mcp-rlm-proxy/releases/tag/v0.1.0
 

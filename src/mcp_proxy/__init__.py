@@ -8,7 +8,7 @@ Model principles (arXiv:2512.24601).
 """
 
 __version__ = "0.2.0"
-__author__ = "MCP Proxy Contributors"
+__author__ = "MCP-RLM Proxy Contributors"
 
 from mcp_proxy.cache import SmartCacheManager
 from mcp_proxy.processors import (

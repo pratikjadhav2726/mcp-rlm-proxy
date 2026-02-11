@@ -15,7 +15,7 @@ CONFIG_FILE=custom.yaml uv run -m mcp_proxy
 LOG_LEVEL=DEBUG uv run -m mcp_proxy
 
 # As installed package
-mcp-proxy
+mcp-rlm-proxy
 ```
 
 ### Configuration File

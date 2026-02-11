@@ -49,7 +49,7 @@ result = await session.call_tool("read_file", {"path": "data.json"})
        │ One connection
        ▼
 ┌─────────────┐
-│ MCP Proxy   │ ◄── Filters, aggregates, tracks
+│ MCP-RLM Proxy │ ◄── Filters, aggregates, tracks
 └──────┬──────┘
        ├─────► Server 1 (filesystem)
        ├─────► Server 2 (git)
