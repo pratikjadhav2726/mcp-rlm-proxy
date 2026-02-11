@@ -22,10 +22,11 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Content, TextContent, Tool, ServerCapabilities
 
-from mcp_proxy.cache import AgentAwareCacheManager, SmartCacheManager
+from mcp_proxy.cache import AgentAwareCacheManager, SmartCacheManager, AsyncCacheManager
 from mcp_proxy.config import ProxySettings
 from mcp_proxy.executor_manager import ExecutorManager
 from mcp_proxy.logging_config import get_logger
+from mcp_proxy.rlm_processor import RecursiveContextManager
 from mcp_proxy.processors import (
     GrepProcessor,
     ProcessorPipeline,
@@ -151,7 +152,11 @@ class MCPProxyServer:
         self.grep_processor = GrepProcessor(self.executor_manager)
         self.pipeline = ProcessorPipeline([self.projection_processor, self.grep_processor])
 
+        # RLM-style recursive context manager for exploration hints
+        self.recursive_context_manager = RecursiveContextManager()
+
         # Response cache (agent-aware if enabled)
+        self.cache: AsyncCacheManager
         if self.settings.enable_agent_isolation:
             self.cache = AgentAwareCacheManager(
                 max_entries_per_agent=self.settings.max_entries_per_agent,
@@ -280,11 +285,6 @@ class MCPProxyServer:
             if not isinstance(arguments, dict):
                 raise ValueError(f"Arguments must be a dictionary, got: {type(arguments)}")
 
-            # Legacy _meta extraction (backward-compat, not advertised)
-            meta = arguments.pop("_meta", None) if isinstance(arguments, dict) else None
-            if meta and not isinstance(meta, dict):
-                    raise ValueError("_meta must be a dictionary")
-
             # ── Resolve server + tool ─────────────────────────────────
             server_name, tool_name = self._resolve_tool_name(name)
 
@@ -308,26 +308,10 @@ class MCPProxyServer:
             content: List[Content] = list(result.content) if hasattr(result, "content") else []
             original_size = _measure_content(content)
 
-            # ── Legacy _meta processing ───────────────────────────────
-            if meta:
-                specs: Dict[str, Dict[str, Any]] = {}
-                if "projection" in meta:
-                    specs["projection"] = meta["projection"]
-                if "grep" in meta:
-                    specs["grep"] = meta["grep"]
-                if specs:
-                    try:
-                        # Use async pipeline execution
-                        pipe_result = await self.pipeline.execute_async(content, specs)
-                        content = pipe_result.content
-                    except Exception as exc:
-                        msg = f"Error applying _meta transformations: {exc}"
-                        logger.error(msg, exc_info=True)
-                        return [TextContent(type="text", text=f"Error: {msg}")]
-
             # ── Auto-truncation + caching ─────────────────────────────
             new_size = _measure_content(content)
             auto_truncated = False
+            exploration_metadata: Optional[Dict[str, Any]] = None
 
             if (
                 self.settings.enable_auto_truncation
@@ -336,20 +320,59 @@ class MCPProxyServer:
                 # Use agent_id if available
                 agent_id = await self._get_agent_id()
                 cache_id = await self.cache.put(content, name, arguments, agent_id=agent_id)
+
+                # Generate RLM exploration hints based on the full content
+                try:
+                    exploration_metadata = self.recursive_context_manager.create_exploration_metadata(
+                        content,
+                        cache_id=cache_id,
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to generate RLM exploration metadata: %s", exc, exc_info=True)
+
                 truncated_text = self._truncate_content(content, self.settings.max_response_size)
-                hint = (
-                    f"\n\n--- Response truncated ({new_size:,} chars). "
+                hint_lines = [
+                    f"--- Response truncated ({new_size:,} chars). "
                     f"Full result cached as cache_id=\"{cache_id}\". "
-                    f"Use proxy_filter, proxy_search, or proxy_explore with this cache_id "
-                    f"to drill into the data. ---"
-                )
+                    "Use proxy_filter, proxy_search, or proxy_explore with this cache_id "
+                    "to drill into the data. ---"
+                ]
+
+                # If we have RLM hints, surface a concise textual summary for agents
+                if exploration_metadata and exploration_metadata.get("rlm_hints"):
+                    rlm_hints = exploration_metadata["rlm_hints"]
+                    steps = rlm_hints.get("next_steps") or []
+                    hint_lines.append("")
+                    hint_lines.append("--- RLM exploration suggestions ---")
+                    for idx, step in enumerate(steps[:3], start=1):
+                        tool = step.get("tool") or "tool"
+                        when = step.get("when") or ""
+                        hint_lines.append(f"{idx}. Call {tool} when: {when}")
+                    extra_hint = rlm_hints.get("hint")
+                    if extra_hint:
+                        hint_lines.append("")
+                        hint_lines.append(extra_hint)
+
+                hint = "\n\n" + "\n".join(hint_lines)
                 content = [TextContent(type="text", text=truncated_text + hint)]
                 auto_truncated = True
                 new_size = _measure_content(content)
 
+            # ── Optional RLM hints for non-truncated responses ────────
+            if not auto_truncated:
+                try:
+                    exploration_metadata = self.recursive_context_manager.create_exploration_metadata(
+                        content,
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to generate RLM exploration metadata: %s", exc, exc_info=True)
+
             # ── Metrics ───────────────────────────────────────────────
-            used_projection = bool(meta and "projection" in meta)
-            used_grep = bool(meta and "grep" in meta)
+            # Legacy `_meta`-driven projection/grep support has been fully removed.
+            # `used_projection` and `used_grep` are now reserved for first-class
+            # proxy tools (see `_handle_proxy_filter` and `_handle_proxy_search`).
+            used_projection = False
+            used_grep = False
             self.metrics.record_call(
                 original_size, new_size, used_projection, used_grep, auto_truncated
             )
@@ -362,6 +385,20 @@ class MCPProxyServer:
                     new_size,
                     savings,
                 )
+
+            # If we have exploration metadata, attach it as a lightweight JSON block
+            if exploration_metadata and exploration_metadata.get("rlm_hints"):
+                try:
+                    meta_text = json.dumps(exploration_metadata, indent=2)
+                    # Append as a separate content item to keep original response intact
+                    content.append(
+                        TextContent(
+                            type="text",
+                            text=f"\n\nRLM exploration metadata:\n{meta_text}",
+                        )
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to attach RLM exploration metadata: %s", exc, exc_info=True)
 
             return content
     
@@ -618,9 +655,33 @@ class MCPProxyServer:
         content = await self._resolve_content_source(arguments)
         max_depth = arguments.get("max_depth", 3)
 
+        # First, use structure-mode grep to produce a human-readable summary
         grep_spec = {"mode": "structure", "maxDepth": max_depth}
-        # Use async version
         result = await self.grep_processor.process_async(content, grep_spec)
+
+        # Then, attempt to derive RLM-style structure hints for follow-up calls
+        exploration_hints: Optional[Dict[str, Any]] = None
+        try:
+            exploration_hints = self.recursive_context_manager.create_exploration_metadata(content)
+        except Exception as exc:
+            logger.debug("Failed to generate RLM hints for proxy_explore: %s", exc, exc_info=True)
+
+        # Attach guidance as an additional content item if available
+        if exploration_hints and exploration_hints.get("rlm_hints"):
+            try:
+                hints_text = json.dumps(exploration_hints, indent=2)
+                guidance = TextContent(
+                    type="text",
+                    text=(
+                        "\n\nRLM-guided next steps:\n"
+                        "You can now use proxy_filter or proxy_search with the suggested projections/grep patterns.\n"
+                        f"{hints_text}"
+                    ),
+                )
+                result.content.append(guidance)
+            except Exception as exc:
+                logger.debug("Failed to attach RLM hints to proxy_explore: %s", exc, exc_info=True)
+
         return result.content
 
     # ------------------------------------------------------------------

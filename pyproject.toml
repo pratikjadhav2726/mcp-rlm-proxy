@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-proxy-server"
+name = "mcp-rlm-proxy"
 version = "0.1.0"
-description = "MCP Proxy Server with field projection and grep capabilities"
+description = "MCP-RLM-Proxy: Intelligent MCP middleware with RLM-style recursive exploration, smart caching, and proxy tools."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    {name = "MCP Proxy Contributors"}
+    {name = "MCP-RLM-Proxy Contributors"}
 ]
 keywords = ["mcp", "model-context-protocol", "proxy", "llm", "ai"]
 classifiers = [
@@ -35,10 +35,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/mcp-proxy-server"
-Documentation = "https://github.com/yourusername/mcp-proxy-server#readme"
-Repository = "https://github.com/yourusername/mcp-proxy-server"
-Issues = "https://github.com/yourusername/mcp-proxy-server/issues"
+Homepage = "https://github.com/pratikjadhav2726/mcp-rlm-proxy"
+Documentation = "https://github.com/pratikjadhav2726/mcp-rlm-proxy#readme"
+Repository = "https://github.com/pratikjadhav2726/mcp-rlm-proxy"
+Issues = "https://github.com/pratikjadhav2726/mcp-rlm-proxy/issues"
 
 [project.scripts]
 mcp-proxy = "mcp_proxy.__main__:main"

@@ -10,13 +10,42 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from mcp.types import Content, TextContent
 
 from mcp_proxy.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@runtime_checkable
+class AsyncCacheManager(Protocol):
+    async def put(
+        self,
+        content: List[Content],
+        tool_name: str,
+        arguments: Dict[str, Any],
+    ) -> str:
+        ...
+
+    async def get(self, cache_id: str) -> Optional[List[Content]]:
+        ...
+
+    async def get_entry(self, cache_id: str) -> Optional["CacheEntry"]:
+        ...
+
+    async def remove(self, cache_id: str) -> bool:
+        ...
+
+    async def clear(self, agent_id: Optional[str] = None) -> None:
+        ...
+
+    async def size(self, agent_id: Optional[str] = None) -> int:
+        ...
+
+    async def stats(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        ...
 
 
 @dataclass
@@ -166,8 +195,8 @@ class SmartCacheManager:
         async with self._lock:
             return self._entries.pop(cache_id, None) is not None
 
-    async def clear(self) -> None:
-        """Remove all cache entries."""
+    async def clear(self, agent_id: Optional[str] = None) -> None:
+        """Remove all cache entries. `agent_id` is ignored for simple caches."""
         async with self._lock:
             self._entries.clear()
             logger.debug("Cache cleared")
@@ -240,6 +269,14 @@ class SmartCacheManager:
                 "ttl_seconds": self.ttl_seconds,
                 "total_cached_bytes": total_bytes,
             }
+
+    async def size(self, agent_id: Optional[str] = None) -> int:
+        """Async size method to satisfy AsyncCacheManager protocol."""
+        return await self.size_async()
+
+    async def stats(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        """Async stats method to satisfy AsyncCacheManager protocol."""
+        return await self.stats_async()
 
 
 # ---------------------------------------------------------------------------

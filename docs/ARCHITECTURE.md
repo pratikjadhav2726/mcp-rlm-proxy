@@ -19,7 +19,7 @@ The MCP-RLM-Proxy acts as an intelligent middleware between MCP clients and unde
 |  | Proxy Tools  | |   proxy_filter, proxy_search, proxy_explore
 |  +--------------+ |
 |  +--------------+ |
-|  | Cache Layer  | |   SmartCacheManager (TTL + LRU eviction)
+|  | Cache Layer  | |   SmartCacheManager / AgentAwareCacheManager
 |  +--------------+ |
 |  +--------------+ |
 |  | Processor    | |   ProcessorPipeline -> ProjectionProcessor
@@ -73,12 +73,17 @@ Advanced search strategies, all inheriting from `BaseProcessor`:
 
 #### `mcp_proxy.cache`
 
-Contains `SmartCacheManager`:
-- TTL-based expiration (configurable, default 300s)
-- LRU eviction when capacity is reached
-- UUID-based cache keys for uniqueness
-- Hit/miss statistics for monitoring
-- Thread-safe for concurrent async operations
+Contains the cache implementations:
+- **`SmartCacheManager`**: Simple TTL‑based, size‑aware cache used for legacy/global mode
+  - TTL-based expiration (configurable, default 300s)
+  - LRU‑style eviction when capacity is reached
+  - UUID‑based cache keys for uniqueness
+  - Thread-safe for concurrent async operations
+- **`AgentAwareCacheManager`**: Agent‑isolated cache used by default
+  - Per‑agent limits on entries and memory
+  - Automatic eviction of least‑recently‑used / largest idle entries
+  - Bounded number of concurrent agents
+  - Backed by the same `CacheEntry` model as `SmartCacheManager`
 
 #### `mcp_proxy.config`
 
@@ -251,14 +256,18 @@ Each processor:
 ## Cache Architecture
 
 ```
-SmartCacheManager
-├── Storage: Dict[str, Tuple[List[Content], float, int]]
-│                         │           │        │
-│                     content     expiry   access_count
-├── Eviction: LRU (least recently used) when max_size reached
-├── TTL: Configurable per-entry, default 300s
-├── Keys: UUID-based (cache_key(tool_name, arguments))
-└── Stats: hits, misses, evictions
+SmartCacheManager (async)
+├── Storage: Dict[str, CacheEntry]
+│                    │
+│                content (List[Content])
+│                tool_name, arguments
+│                created_at, last_accessed_at
+│                access_count, size_bytes
+├── TTL: Configurable per-entry, default 300s (ttl_seconds)
+├── Eviction: size-aware LRU (evicts entries with largest idle_seconds × size_bytes)
+├── Keys: UUID-based short IDs (first 12 chars of UUID4)
+├── API: Async put/get/get_entry/remove/clear/size/stats
+└── AgentAwareCacheManager: per-agent isolation and quotas built on SmartCacheManager
 ```
 
 ## Error Handling
