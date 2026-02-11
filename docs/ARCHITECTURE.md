@@ -251,14 +251,18 @@ Each processor:
 ## Cache Architecture
 
 ```
-SmartCacheManager
-├── Storage: Dict[str, Tuple[List[Content], float, int]]
-│                         │           │        │
-│                     content     expiry   access_count
-├── Eviction: LRU (least recently used) when max_size reached
-├── TTL: Configurable per-entry, default 300s
-├── Keys: UUID-based (cache_key(tool_name, arguments))
-└── Stats: hits, misses, evictions
+SmartCacheManager (async)
+├── Storage: Dict[str, CacheEntry]
+│                    │
+│                content (List[Content])
+│                tool_name, arguments
+│                created_at, last_accessed_at
+│                access_count, size_bytes
+├── TTL: Configurable per-entry, default 300s (ttl_seconds)
+├── Eviction: size-aware LRU (evicts entries with largest idle_seconds × size_bytes)
+├── Keys: UUID-based short IDs (first 12 chars of UUID4)
+├── API: Async put/get/get_entry/remove/clear/size/stats
+└── AgentAwareCacheManager: per-agent isolation and quotas built on SmartCacheManager
 ```
 
 ## Error Handling

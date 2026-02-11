@@ -63,7 +63,7 @@ class RecursiveContextManager:
         suggestions = {
             "should_decompose": False,
             "strategies": [],
-            "estimated_savings": 0
+            "estimated_savings": 0,
         }
         
         for item in content:
@@ -77,21 +77,21 @@ class RecursiveContextManager:
                 data = json.loads(text)
                 
                 if isinstance(data, dict):
-                    # Suggest field-based exploration
+                    # Suggest field-based exploration via proxy_filter
                     keys = list(data.keys())
                     suggestions["should_decompose"] = True
                     suggestions["strategies"].append({
-                        "type": "field_projection",
-                        "description": "Use projection to access specific fields",
+                        "type": "proxy_filter",
+                        "description": "Use proxy_filter to project specific fields from the cached result",
                         "available_fields": keys[:10],  # Show first 10 fields
                         "total_fields": len(keys),
                         "example": {
-                            "_meta": {
-                                "projection": {
+                            "tool": "proxy_filter",
+                            "arguments": {
+                                "cache_id": "<CACHE_ID_FROM_TRUNCATED_RESPONSE>",
+                                "fields": keys[:3],
                                     "mode": "include",
-                                    "fields": keys[:3]
-                                }
-                            }
+                            },
                         }
                     })
                     
@@ -99,16 +99,16 @@ class RecursiveContextManager:
                     array_fields = [k for k, v in data.items() if isinstance(v, list)]
                     if array_fields:
                         suggestions["strategies"].append({
-                            "type": "array_exploration",
-                            "description": "Explore array fields element by element",
+                            "type": "proxy_filter_array",
+                            "description": "Use proxy_filter to explore array fields element by element",
                             "array_fields": array_fields,
                             "example": {
-                                "_meta": {
-                                    "projection": {
+                                "tool": "proxy_filter",
+                                "arguments": {
+                                    "cache_id": "<CACHE_ID_FROM_TRUNCATED_RESPONSE>",
+                                    "fields": [f"{array_fields[0]}.id", f"{array_fields[0]}.name"],
                                         "mode": "include",
-                                        "fields": [f"{array_fields[0]}.id", f"{array_fields[0]}.name"]
-                                    }
-                                }
+                                },
                             }
                         })
                     
@@ -118,39 +118,40 @@ class RecursiveContextManager:
                     suggestions["estimated_savings"] = max(0, full_size - projected_size)
                 
                 elif isinstance(data, list):
-                    # Suggest pagination or filtering
+                    # Suggest pagination or filtering via proxy_filter / proxy_explore
                     suggestions["should_decompose"] = True
                     suggestions["strategies"].append({
                         "type": "list_pagination",
-                        "description": "Process list in chunks using projection",
+                        "description": "Use proxy_filter or proxy_explore to process list in chunks",
                         "list_length": len(data),
                         "example": {
-                            "_meta": {
-                                "projection": {
+                            "tool": "proxy_filter",
+                            "arguments": {
+                                "cache_id": "<CACHE_ID_FROM_TRUNCATED_RESPONSE>",
+                                "fields": ["[0:10]"],  # First 10 items (pseudo-syntax)
                                     "mode": "include",
-                                    "fields": ["[0:10]"]  # First 10 items (pseudo-syntax)
-                                }
-                            }
-                        }
+                            },
+                        },
                     })
                     
             except json.JSONDecodeError:
-                # Plain text - suggest grep-based exploration
+                # Plain text - suggest proxy_search-based exploration
                 lines = text.split("\n")
                 if len(lines) > 100:
                     suggestions["should_decompose"] = True
                     suggestions["strategies"].append({
-                        "type": "grep_search",
-                        "description": "Use grep to search within large text",
+                        "type": "proxy_search",
+                        "description": "Use proxy_search to search within large cached text",
                         "total_lines": len(lines),
                         "example": {
-                            "_meta": {
-                                "grep": {
+                            "tool": "proxy_search",
+                            "arguments": {
+                                "cache_id": "<CACHE_ID_FROM_TRUNCATED_RESPONSE>",
                                     "pattern": "ERROR|WARN",
-                                    "maxMatches": 20,
-                                    "contextLines": {"both": 2}
-                                }
-                            }
+                                "mode": "regex",
+                                "max_results": 20,
+                                "context_lines": 2,
+                            },
                         }
                     })
                     
@@ -161,7 +162,11 @@ class RecursiveContextManager:
         
         return suggestions
     
-    def create_exploration_metadata(self, content: List[Content]) -> Optional[Dict[str, Any]]:
+    def create_exploration_metadata(
+        self,
+        content: List[Content],
+        cache_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Create metadata that can be returned with responses to guide recursive exploration.
         
@@ -175,13 +180,38 @@ class RecursiveContextManager:
         
         if not suggestions["should_decompose"]:
             return None
+
+        # Build concrete next_steps in the spirit of RLM: explicit follow-up calls
+        next_steps: List[Dict[str, Any]] = []
+        for strategy in suggestions["strategies"]:
+            example = strategy.get("example") or {}
+            tool = example.get("tool")
+            arguments = dict(example.get("arguments") or {})
+
+            # Thread through real cache_id if available
+            if cache_id and "cache_id" in arguments:
+                arguments["cache_id"] = cache_id
+
+            if tool:
+                next_steps.append(
+                    {
+                        "tool": tool,
+                        "when": strategy.get("description") or "",
+                        "arguments": arguments,
+                    }
+                )
         
         return {
             "rlm_hints": {
                 "recursive_exploration_available": True,
                 "strategies": suggestions["strategies"],
+                "next_steps": next_steps,
                 "estimated_token_savings": suggestions["estimated_savings"],
-                "hint": "This response is large. Consider using _meta.projection or _meta.grep to explore it recursively."
+                "hint": (
+                    "This response is large. Consider using exactly one of the proxy tools "
+                    "`proxy_filter`, `proxy_search`, or `proxy_explore` with the provided "
+                    "cache_id, based on the suggested next_steps."
+                ),
             }
         }
 
@@ -283,56 +313,6 @@ class ChunkProcessor:
                 result.append(sorted_chunks[i]["text"][overlap_size:])
             else:
                 result.append(sorted_chunks[i]["text"])
-        
-        return "".join(result)
-
-
-class SmartCacheManager:
-    """
-    Manages caching of tool outputs for efficient recursive exploration.
-    
-    Allows agents to make multiple filtered calls to the same large output
-    without re-executing the tool.
-    """
-    
-    def __init__(self, max_cache_size: int = 10):
-        self.cache: Dict[str, Any] = {}
-        self.max_size = max_cache_size
-        self.access_count: Dict[str, int] = {}
-    
-    def cache_key(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """Generate a cache key for a tool call."""
-        # Remove _meta from arguments for cache key
-        args_without_meta = {k: v for k, v in arguments.items() if k != "_meta"}
-        return f"{tool_name}:{json.dumps(args_without_meta, sort_keys=True)}"
-    
-    def get(self, key: str) -> Optional[List[Content]]:
-        """Get cached content."""
-        if key in self.cache:
-            self.access_count[key] = self.access_count.get(key, 0) + 1
-            logger.debug(f"Cache hit for key: {key[:50]}... (accessed {self.access_count[key]} times)")
-            return self.cache[key]
-        return None
-    
-    def put(self, key: str, content: List[Content]):
-        """Store content in cache."""
-        if len(self.cache) >= self.max_size:
-            # Evict least accessed item
-            min_key = min(self.access_count.items(), key=lambda x: x[1])[0]
-            del self.cache[min_key]
-            del self.access_count[min_key]
-            logger.debug(f"Evicted cache key: {min_key[:50]}...")
-        
-        self.cache[key] = content
-        self.access_count[key] = 0
-        logger.debug(f"Cached result for key: {key[:50]}...")
-    
-    def clear(self):
-        """Clear the cache."""
-        self.cache.clear()
-        self.access_count.clear()
-        logger.debug("Cache cleared")
-
 
 class FieldDiscoveryHelper:
     """

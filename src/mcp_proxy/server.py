@@ -22,7 +22,7 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Content, TextContent, Tool, ServerCapabilities
 
-from mcp_proxy.cache import AgentAwareCacheManager, SmartCacheManager
+from mcp_proxy.cache import AgentAwareCacheManager, SmartCacheManager, AsyncCacheManager
 from mcp_proxy.config import ProxySettings
 from mcp_proxy.executor_manager import ExecutorManager
 from mcp_proxy.logging_config import get_logger
@@ -156,6 +156,7 @@ class MCPProxyServer:
         self.recursive_context_manager = RecursiveContextManager()
 
         # Response cache (agent-aware if enabled)
+        self.cache: AsyncCacheManager
         if self.settings.enable_agent_isolation:
             self.cache = AgentAwareCacheManager(
                 max_entries_per_agent=self.settings.max_entries_per_agent,
@@ -323,7 +324,8 @@ class MCPProxyServer:
                 # Generate RLM exploration hints based on the full content
                 try:
                     exploration_metadata = self.recursive_context_manager.create_exploration_metadata(
-                        content
+                        content,
+                        cache_id=cache_id,
                     )
                 except Exception as exc:
                     logger.debug("Failed to generate RLM exploration metadata: %s", exc, exc_info=True)
@@ -339,13 +341,13 @@ class MCPProxyServer:
                 # If we have RLM hints, surface a concise textual summary for agents
                 if exploration_metadata and exploration_metadata.get("rlm_hints"):
                     rlm_hints = exploration_metadata["rlm_hints"]
-                    strategies = rlm_hints.get("strategies") or []
+                    steps = rlm_hints.get("next_steps") or []
                     hint_lines.append("")
                     hint_lines.append("--- RLM exploration suggestions ---")
-                    for idx, strategy in enumerate(strategies[:3], start=1):
-                        desc = strategy.get("description") or ""
-                        stype = strategy.get("type") or "strategy"
-                        hint_lines.append(f"{idx}. [{stype}] {desc}")
+                    for idx, step in enumerate(steps[:3], start=1):
+                        tool = step.get("tool") or "tool"
+                        when = step.get("when") or ""
+                        hint_lines.append(f"{idx}. Call {tool} when: {when}")
                     extra_hint = rlm_hints.get("hint")
                     if extra_hint:
                         hint_lines.append("")
@@ -360,7 +362,7 @@ class MCPProxyServer:
             if not auto_truncated:
                 try:
                     exploration_metadata = self.recursive_context_manager.create_exploration_metadata(
-                        content
+                        content,
                     )
                 except Exception as exc:
                     logger.debug("Failed to generate RLM exploration metadata: %s", exc, exc_info=True)
