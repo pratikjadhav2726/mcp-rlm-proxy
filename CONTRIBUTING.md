@@ -1,4 +1,4 @@
-# Contributing to MCP Proxy Server
+# Contributing to MCP‑RLM‑Proxy
 
 Thank you for your interest in contributing to MCP Proxy Server! This document provides guidelines and instructions for contributing.
 
@@ -13,7 +13,7 @@ Thank you for your interest in contributing to MCP Proxy Server! This document p
 
 ### Reporting Bugs
 
-1. Check if the bug has already been reported in the [Issues](https://github.com/yourusername/mcp-proxy-server/issues)
+1. Check if the bug has already been reported in the [Issues](https://github.com/pratikjadhav2726/mcp-rlm-proxy/issues)
 2. If not, create a new issue with:
    - A clear, descriptive title
    - Steps to reproduce the bug
@@ -65,8 +65,8 @@ Thank you for your interest in contributing to MCP Proxy Server! This document p
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/mcp-proxy-server.git
-   cd mcp-proxy-server
+   git clone https://github.com/pratikjadhav2726/mcp-rlm-proxy.git
+   cd mcp-rlm-proxy
    ```
 
 2. **Install dependencies**:
@@ -114,18 +114,23 @@ Thank you for your interest in contributing to MCP Proxy Server! This document p
 ## Project Structure
 
 ```
-mcp-proxy-server/
+mcp-rlm-proxy/
 ├── src/
-│   └── mcp_proxy/          # Main package code
+│   └── mcp_proxy/            # Main package code
 │       ├── __init__.py
-│       ├── __main__.py     # Entry point
-│       ├── server.py       # Main server implementation
-│       ├── processors.py   # Projection and grep processors
-│       └── config.py       # Configuration loading
-├── tests/                  # Test files
-├── examples/               # Example usage
-├── docs/                   # Additional documentation
-├── pyproject.toml          # Project configuration
+│       ├── __main__.py       # Entry point / CLI
+│       ├── server.py         # MCPProxyServer implementation
+│       ├── cache.py          # Smart and agent‑aware caches
+│       ├── processors.py     # Projection and grep processors
+│       ├── advanced_search.py# BM25 / fuzzy / context / structure search
+│       ├── rlm_processor.py  # RLM‑style exploration helpers
+│       ├── executor_manager.py
+│       ├── config.py         # Configuration loading (mcp.json + proxySettings)
+│       └── logging_config.py
+├── tests/                    # Test files
+├── examples/                 # Example usage
+├── docs/                     # Additional documentation
+├── pyproject.toml            # Project configuration
 └── README.md
 ```
 
@@ -133,5 +138,5 @@ mcp-proxy-server/
 
 Feel free to open an issue for questions or discussions. We're happy to help!
 
-Thank you for contributing! 🎉
+Thank you for contributing!
 

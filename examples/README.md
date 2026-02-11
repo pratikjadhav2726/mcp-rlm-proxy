@@ -35,7 +35,7 @@ cd examples
 python example_usage.py
 ```
 
-**Note**: Requires configured servers in `config.yaml`
+**Note**: Requires configured servers in `mcp.json`
 
 ## Quick Examples
 
@@ -234,13 +234,17 @@ details = await session.call_tool("proxy_filter", {
 
 ### "Server not found"
 
-Ensure proxy is configured with servers in `config.yaml`:
+Ensure the proxy is configured with servers in `mcp.json`:
 
-```yaml
-underlying_servers:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
 ```
 
 ### "Tool name not found"
@@ -250,6 +254,7 @@ Tools are prefixed with server names:
 - `commit` → `git_commit`
 
 List available tools:
+
 ```python
 tools = await session.list_tools()
 print([t.name for t in tools.tools])
@@ -257,10 +262,12 @@ print([t.name for t in tools.tools])
 
 ### "_meta not working"
 
-Ensure:
-1. `_meta` is at same level as other arguments (not nested)
-2. Tool is called through proxy (has server prefix)
-3. JSON structure is valid
+The preferred interface is to use the proxy tools (`proxy_filter`, `proxy_search`, `proxy_explore`).  
+Legacy `_meta` support is still available for backward compatibility:
+
+1. `_meta` must be at the same level as other arguments (not nested)
+2. The tool must be called through the proxy (has a server prefix)
+3. JSON structure must be valid
 
 ## More Resources
 
